@@ -101,9 +101,12 @@ TARN implements several security features:
 - **YARN Isolation**: Leverages YARN's multi-tenancy and Docker isolation.
 - **Kerberos Support**: Compatible with secured Hadoop clusters (ensure the discovery script has a valid ticket).
 
-## Deployment Examples
+## Usage Examples (Open Inference Protocol)
+
+Below are examples of how to consume the inference service using the **Open Inference Protocol** (via the `tritonclient` Python library). These examples assume you are targeting the HAProxy endpoint or a direct Triton instance.
 
 ### 1. Stable Diffusion (Image Generation)
+
 To deploy Stable Diffusion, you need to have the model repository structured correctly on HDFS.
 ```bash
 yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
@@ -111,22 +114,92 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --image nvcr.io/nvidia/tritonserver:24.09-py3 \
   --token secret-token
 ```
-Ensure you have the Python backend dependencies installed in your custom Docker image if using the standard one isn't enough.
+
+**Client Code (Python):**
+```python
+import numpy as np
+from PIL import Image
+from tritonclient.http import InferenceServerClient, InferInput
+
+# Connect to the server (HAProxy or direct instance)
+client = InferenceServerClient(url="localhost:8000")
+
+prompt = "A futuristic city in the style of cyberpunk"
+input_data = np.array([prompt], dtype=object)
+
+# Setup inputs according to the model configuration
+inputs = [InferInput("PROMPT", [1], "BYTES")]
+inputs[0].set_data_from_numpy(input_data)
+
+# Run inference
+response = client.infer("stable_diffusion", inputs)
+
+# Extract and save the generated image
+image_data = response.as_numpy("IMAGES")[0]
+image = Image.fromarray(image_data.astype(np.uint8))
+image.save("generated_image.png")
+```
 
 ### 2. ONNX Model (Quick Deploy)
-Deploying an ONNX model (e.g., ResNet-50) is straightforward:
+
+Deploying an ONNX model (e.g., ResNet-50) from HDFS:
 ```bash
 yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --model-repository hdfs:///models/onnx_resnet50 \
   --image nvcr.io/nvidia/tritonserver:24.09-py3
 ```
 
-### 3. PyTorch Model
-For PyTorch models (LibTorch), ensure the `model.pt` is in the correct version folder:
+**Client Code (Python):**
+```python
+import numpy as np
+import tritonclient.http as httpclient
+
+client = httpclient.InferenceServerClient(url="localhost:8000")
+
+# Prepare dummy input data (e.g., for ResNet-50)
+input_shape = (1, 3, 224, 224)
+data = np.random.randn(*input_shape).astype(np.float32)
+
+inputs = [httpclient.InferInput("input_0", input_shape, "FP32")]
+inputs[0].set_data_from_numpy(data)
+
+# Request inference
+results = client.infer("onnx_resnet50", inputs)
+
+# Get output
+output_data = results.as_numpy("output_0")
+print(f"Inference result shape: {output_data.shape}")
+```
+
+### 3. PyTorch Model (LibTorch)
+
+For PyTorch models, ensure the model is exported as TorchScript and stored on HDFS:
 ```bash
 yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --model-repository hdfs:///models/pytorch_densenet \
   --image nvcr.io/nvidia/tritonserver:24.09-py3
+```
+
+**Client Code (Python):**
+```python
+import numpy as np
+import tritonclient.http as httpclient
+
+client = httpclient.InferenceServerClient(url="localhost:8000")
+
+# Example input for an image classification model
+data = np.random.randn(1, 3, 224, 224).astype(np.float32)
+
+inputs = [httpclient.InferInput("INPUT__0", [1, 3, 224, 224], "FP32")]
+inputs[0].set_data_from_numpy(data)
+
+# Call Triton
+response = client.infer("pytorch_densenet", inputs)
+
+# Parse output
+probabilities = response.as_numpy("OUTPUT__0")
+predicted_class = np.argmax(probabilities)
+print(f"Predicted class ID: {predicted_class}")
 ```
 
 ## Monitoring with Grafana
