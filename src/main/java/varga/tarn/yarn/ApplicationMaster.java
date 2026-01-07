@@ -17,10 +17,18 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * ApplicationMaster for Triton on YARN.
@@ -41,10 +49,13 @@ public class ApplicationMaster {
     private String tritonImage;
     private String modelRepositoryHdfs;
     private int tritonPort;
-    private int amPort;
+    private int metricsPort;
+    int amPort;
+    String bindAddress;
     private String apiToken;
     private int containerMemory;
     private int containerVCores;
+    private HttpClient httpClient;
 
     public ApplicationMaster() {
         conf = new YarnConfiguration();
@@ -53,10 +64,15 @@ public class ApplicationMaster {
                 System.getenv("TRITON_IMAGE") : "nvcr.io/nvidia/tritonserver:24.09-py3";
         modelRepositoryHdfs = System.getenv("MODEL_REPOSITORY_HDFS");
         tritonPort = Integer.parseInt(System.getenv().getOrDefault("TRITON_PORT", "8000"));
+        metricsPort = Integer.parseInt(System.getenv().getOrDefault("METRICS_PORT", "8002"));
         amPort = Integer.parseInt(System.getenv().getOrDefault("AM_PORT", "8888"));
+        bindAddress = System.getenv().getOrDefault("BIND_ADDRESS", "0.0.0.0");
         apiToken = System.getenv("TARN_TOKEN");
         containerMemory = Integer.parseInt(System.getenv().getOrDefault("CONTAINER_MEMORY", "4096"));
         containerVCores = Integer.parseInt(System.getenv().getOrDefault("CONTAINER_VCORES", "2"));
+        httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(5))
+                .build();
     }
 
     public void init(String[] args) throws ParseException {
@@ -64,7 +80,9 @@ public class ApplicationMaster {
         options.addOption("m", "model-repository", true, "HDFS path to model repository");
         options.addOption("i", "image", true, "Triton Docker image");
         options.addOption("p", "port", true, "Triton HTTP port");
+        options.addOption("mp", "metrics-port", true, "Triton metrics port");
         options.addOption("ap", "am-port", true, "AM HTTP port");
+        options.addOption("a", "address", true, "Bind address for HTTP servers");
         options.addOption("t", "token", true, "Security token for API");
 
         CommandLineParser parser = new PosixParser();
@@ -79,8 +97,14 @@ public class ApplicationMaster {
         if (line.hasOption("port")) {
             tritonPort = Integer.parseInt(line.getOptionValue("port"));
         }
+        if (line.hasOption("metrics-port")) {
+            metricsPort = Integer.parseInt(line.getOptionValue("metrics-port"));
+        }
         if (line.hasOption("am-port")) {
             amPort = Integer.parseInt(line.getOptionValue("am-port"));
+        }
+        if (line.hasOption("address")) {
+            bindAddress = line.getOptionValue("address");
         }
         if (line.hasOption("token")) {
             apiToken = line.getOptionValue("token");
@@ -104,8 +128,9 @@ public class ApplicationMaster {
         nmClient.start();
 
         // Register with ResourceManager
-        amRMClient.registerApplicationMaster("", 0, "");
-        log.info("ApplicationMaster registered with RM");
+        String appMasterHostname = InetAddress.getLocalHost().getHostName();
+        amRMClient.registerApplicationMaster(appMasterHostname, amPort, "http://" + appMasterHostname + ":" + amPort);
+        log.info("ApplicationMaster registered with RM at {}:{}", appMasterHostname, amPort);
 
         // Initial request for Triton containers
         requestContainers();
@@ -129,7 +154,7 @@ public class ApplicationMaster {
     }
 
     private void startHttpServer() throws IOException {
-        httpServer = HttpServer.create(new InetSocketAddress(amPort), 0);
+        httpServer = HttpServer.create(new InetSocketAddress(bindAddress, amPort), 0);
         httpServer.createContext("/instances", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
@@ -180,20 +205,76 @@ public class ApplicationMaster {
 
     private void monitorMetricsAndScale() {
         log.info("Monitoring instances... Current active: {}", runningContainers.size());
-        double avgLoad = Math.random(); // Simulated
+        double avgLoad = getAverageLoad();
 
         if (avgLoad > 0.7 && targetNumContainers.get() < 10) {
-            log.info("High load detected ({}), scaling up...", avgLoad);
+            log.info("High load detected ({}), scaling up...", String.format("%.2f", avgLoad));
             targetNumContainers.incrementAndGet();
             requestContainers();
         } else if (avgLoad < 0.2 && targetNumContainers.get() > 1) {
-            log.info("Low load detected ({}), scaling down...", avgLoad);
+            log.info("Low load detected ({}), scaling down...", String.format("%.2f", avgLoad));
             targetNumContainers.decrementAndGet();
             if (!runningContainers.isEmpty()) {
                 Container cToStop = runningContainers.get(0);
                 nmClient.stopContainerAsync(cToStop.getId(), cToStop.getNodeId());
             }
         }
+    }
+
+    private double getAverageLoad() {
+        if (runningContainers.isEmpty()) return 0.0;
+
+        double totalLoad = 0;
+        int count = 0;
+        synchronized (runningContainers) {
+            for (Container c : runningContainers) {
+                double load = fetchContainerLoad(c.getNodeId().getHost());
+                totalLoad += load;
+                count++;
+            }
+        }
+        return count > 0 ? totalLoad / count : 0.0;
+    }
+
+    private double fetchContainerLoad(String host) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("http://" + host + ":" + metricsPort + "/metrics"))
+                    .timeout(Duration.ofSeconds(3))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return parseLoadFromMetrics(response.body());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch metrics from {}: {}", host, e.getMessage());
+        }
+        return 0.0;
+    }
+
+    private double parseLoadFromMetrics(String metrics) {
+        // Try to find GPU utilization first
+        Pattern gpuPattern = Pattern.compile("nv_gpu_utilization\\{[^}]*\\}\\s+([\\d.]+)");
+        Matcher gpuMatcher = gpuPattern.matcher(metrics);
+        double totalGpuLoad = 0;
+        int gpuCount = 0;
+        while (gpuMatcher.find()) {
+            totalGpuLoad += Double.parseDouble(gpuMatcher.group(1));
+            gpuCount++;
+        }
+        if (gpuCount > 0) return (totalGpuLoad / gpuCount) / 100.0;
+
+        // Fallback to a simple heuristic if no GPU metrics: 
+        // use nv_inference_request_duration_us per model? 
+        // For simplicity, if we see any activity, we return a base load or 0.
+        // A more advanced AM would track the rate of change.
+        if (metrics.contains("nv_inference_request_success")) {
+            // If the metric exists, we consider it at least working.
+            // In a real world, we'd compare with previous value.
+            return 0.3; // Placeholder for "active"
+        }
+
+        return 0.0;
     }
 
     /**
@@ -214,7 +295,11 @@ public class ApplicationMaster {
 
                 String modelPath = "/models";
                 String launchCommand;
-                String tritonArgs = " --model-repository=" + modelPath + " --http-port=" + tritonPort;
+                String tritonArgs = " --model-repository=" + modelPath + 
+                                   " --http-port=" + tritonPort + 
+                                   " --metrics-port=" + metricsPort +
+                                   " --http-address=" + bindAddress +
+                                   " --metrics-address=" + bindAddress;
 
                 if (modelRepositoryHdfs != null && !modelRepositoryHdfs.isEmpty()) {
                     launchCommand = "mkdir -p " + modelPath + " && " +
@@ -254,7 +339,9 @@ public class ApplicationMaster {
 
         @Override
         public float getProgress() {
-            return 0.5f;
+            int target = targetNumContainers.get();
+            if (target <= 0) return 0.0f;
+            return (float) runningContainers.size() / target;
         }
 
         @Override

@@ -40,7 +40,9 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --model-repository [hdfs_model_path] \
   --image [triton_image] \
   --port [triton_port] \
+  --metrics-port [metrics_port] \
   --am-port [am_port] \
+  --address [bind_address] \
   --token [security_token]
 ```
 
@@ -50,7 +52,9 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --model-repository hdfs:///user/models/resnet50 \
   --image nvcr.io/nvidia/tritonserver:24.09-py3 \
   --port 8000 \
+  --metrics-port 8002 \
   --am-port 8888 \
+  --address 0.0.0.0 \
   --token my-secret-token
 ```
 

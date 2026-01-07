@@ -39,10 +39,12 @@ public class Client {
         options.addOption("m", "model-repository", true, "HDFS path to model repository");
         options.addOption("i", "image", true, "Triton Docker image");
         options.addOption("p", "port", true, "Triton HTTP port (default 8000)");
+        options.addOption("mp", "metrics-port", true, "Triton metrics port (default 8002)");
         options.addOption("ap", "am-port", true, "AM HTTP port (default 8888)");
+        options.addOption("a", "address", true, "Bind address (default 0.0.0.0)");
         options.addOption("t", "token", true, "Security token for AM API");
 
-        CommandLineParser parser = new DefaultParser();
+        CommandLineParser parser = new PosixParser();
         CommandLine line;
         try {
             line = parser.parse(options, args);
@@ -55,7 +57,9 @@ public class Client {
         String modelHdfsPath = line.getOptionValue("model-repository", "hdfs:///models");
         String tritonImage = line.getOptionValue("image", "nvcr.io/nvidia/tritonserver:24.09-py3");
         String tritonPort = line.getOptionValue("port", "8000");
+        String metricsPort = line.getOptionValue("metrics-port", "8002");
         String amPort = line.getOptionValue("am-port", "8888");
+        String bindAddress = line.getOptionValue("address", "0.0.0.0");
         String token = line.getOptionValue("token", "");
 
         yarnClient.start();
@@ -82,7 +86,9 @@ public class Client {
         env.put("MODEL_REPOSITORY_HDFS", modelHdfsPath);
         env.put("TRITON_IMAGE", tritonImage);
         env.put("TRITON_PORT", tritonPort);
+        env.put("METRICS_PORT", metricsPort);
         env.put("AM_PORT", amPort);
+        env.put("BIND_ADDRESS", bindAddress);
         if (!token.isEmpty()) {
             env.put("TARN_TOKEN", token);
         }
@@ -106,7 +112,9 @@ public class Client {
                         " --model-repository " + modelHdfsPath +
                         " --image " + tritonImage +
                         " --port " + tritonPort +
+                        " --metrics-port " + metricsPort +
                         " --am-port " + amPort +
+                        " --address " + bindAddress +
                         (token.isEmpty() ? "" : " --token " + token) +
                         " 1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stdout" +
                         " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stderr"
