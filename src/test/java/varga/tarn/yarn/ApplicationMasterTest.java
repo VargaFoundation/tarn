@@ -18,7 +18,8 @@ public class ApplicationMasterTest {
             "--port", "9000", 
             "--image", "test-image", 
             "--model-repository", "hdfs://test",
-            "--address", "127.0.0.1"
+            "--address", "127.0.0.1",
+            "--secrets", "hdfs:///path/to/secrets.jks"
         };
         am.init(args);
         
@@ -27,5 +28,6 @@ public class ApplicationMasterTest {
         assertEquals(9000, config.tritonPort);
         assertEquals("test-image", config.tritonImage);
         assertEquals("hdfs://test", config.modelRepositoryHdfs);
+        assertEquals("hdfs:///path/to/secrets.jks", config.secretsPath);
     }
 }

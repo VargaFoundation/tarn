@@ -26,11 +26,25 @@ public class DiscoveryServerTest {
         List<Container> containers = new ArrayList<>();
         Container mockContainer = mock(Container.class);
         NodeId mockNodeId = mock(NodeId.class);
+        org.apache.hadoop.yarn.api.records.ContainerId mockContainerId = mock(org.apache.hadoop.yarn.api.records.ContainerId.class);
+        when(mockContainerId.toString()).thenReturn("container_123");
         when(mockNodeId.getHost()).thenReturn("host1");
         when(mockContainer.getNodeId()).thenReturn(mockNodeId);
+        when(mockContainer.getId()).thenReturn(mockContainerId);
         containers.add(mockContainer);
 
-        DiscoveryServer server = new DiscoveryServer(config, containers);
+        ApplicationMaster mockAm = mock(ApplicationMaster.class);
+        MetricsCollector mockMetrics = mock(MetricsCollector.class);
+        when(mockMetrics.fetchLoadedModels(anyString(), anyInt())).thenReturn("[]");
+        when(mockMetrics.fetchContainerLoad(anyString())).thenReturn(0.5);
+        when(mockMetrics.fetchGpuMetrics(anyString())).thenReturn(new java.util.HashMap<>());
+        
+        when(mockAm.getRunningContainers()).thenReturn(containers);
+        when(mockAm.getAvailableModels()).thenReturn(new ArrayList<>());
+        when(mockAm.getMetricsCollector()).thenReturn(mockMetrics);
+        when(mockAm.getAvailableResources()).thenReturn(org.apache.hadoop.yarn.api.records.Resource.newInstance(1024, 1));
+
+        DiscoveryServer server = new DiscoveryServer(config, mockAm);
         server.start();
         int actualPort = server.getPort();
 
@@ -52,6 +66,15 @@ public class DiscoveryServerTest {
             HttpResponse<String> resp2 = client.send(req2, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resp2.statusCode());
             assertTrue(resp2.body().contains("host1:8000"));
+
+            // 3. Dashboard request
+            HttpRequest req3 = HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/dashboard?token=test-token"))
+                    .build();
+            HttpResponse<String> resp3 = client.send(req3, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, resp3.statusCode());
+            assertTrue(resp3.body().contains("TARN Dashboard"));
+            assertTrue(resp3.body().contains("host1"));
 
         } finally {
             server.stop();

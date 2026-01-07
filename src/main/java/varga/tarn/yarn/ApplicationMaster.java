@@ -1,8 +1,14 @@
 package varga.tarn.yarn;
 
+
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.*;
+import org.apache.hadoop.yarn.api.resource.PlacementConstraint;
+import org.apache.hadoop.yarn.api.resource.PlacementConstraints;
 import org.apache.hadoop.yarn.client.api.AMRMClient;
 import org.apache.hadoop.yarn.client.api.async.AMRMClientAsync;
 import org.apache.hadoop.yarn.client.api.async.NMClientAsync;
@@ -16,6 +22,7 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * ApplicationMaster for Triton on YARN.
@@ -31,6 +38,7 @@ public class ApplicationMaster {
     private final ScalingPolicy scalingPolicy;
     private final List<Container> runningContainers = Collections.synchronizedList(new ArrayList<>());
     private final AtomicInteger targetNumContainers = new AtomicInteger(1);
+    private final AtomicLong allocationRequestIdCounter = new AtomicLong(0);
 
     private AMRMClientAsync<AMRMClient.ContainerRequest> amRMClient;
     private NMClientAsync nmClient;
@@ -50,7 +58,7 @@ public class ApplicationMaster {
     public void run() throws Exception {
         log.info("Starting ApplicationMaster...");
         
-        discoveryServer = new DiscoveryServer(config, runningContainers);
+        discoveryServer = new DiscoveryServer(config, this);
         discoveryServer.start();
 
         // Initialize RM Client
@@ -65,9 +73,18 @@ public class ApplicationMaster {
 
         // Register with ResourceManager
         String appMasterHostname = InetAddress.getLocalHost().getHostName();
-        amRMClient.registerApplicationMaster(appMasterHostname, config.amPort, 
-                "http://" + appMasterHostname + ":" + config.amPort);
-        log.info("ApplicationMaster registered with RM at {}:{}", appMasterHostname, config.amPort);
+
+        // Anti-affinity constraint: no more than 1 container with tag "triton" per node
+        PlacementConstraint tritonConstraint = PlacementConstraints.targetNotIn(
+                PlacementConstraints.NODE,
+                PlacementConstraints.PlacementTargets.allocationTag("triton")
+        ).build();
+        Map<Set<String>, PlacementConstraint> constraints = Collections.singletonMap(
+                Collections.singleton("triton"), tritonConstraint);
+
+        amRMClient.registerApplicationMaster(appMasterHostname, config.amPort,
+                "http://" + appMasterHostname + ":" + config.amPort, constraints);
+        log.info("ApplicationMaster registered with RM at {}:{} with anti-affinity constraints", appMasterHostname, config.amPort);
 
         // Initial request for Triton containers
         requestContainers();
@@ -105,14 +122,25 @@ public class ApplicationMaster {
 
         if (needed > 0) {
             log.info("Requesting {} additional containers", needed);
-            Resource capability = Records.newRecord(Resource.class);
-            capability.setMemorySize(config.containerMemory);
-            capability.setVirtualCores(config.containerVCores);
+            Resource capability = Resource.newInstance(config.containerMemory, config.containerVCores);
+            int numGpus = config.tensorParallelism * config.pipelineParallelism;
+            if (numGpus > 0) {
+                try {
+                    capability.setResourceValue("yarn.io/gpu", numGpus);
+                } catch (NoSuchMethodError e) {
+                    log.warn("GPU resource request not supported by this YARN version");
+                }
+            }
             Priority priority = Priority.newInstance(0);
 
             for (int i = 0; i < needed; i++) {
-                AMRMClient.ContainerRequest request = new AMRMClient.ContainerRequest(capability, null, null, priority);
-                amRMClient.addContainerRequest(request);
+                SchedulingRequest schedulingRequest = SchedulingRequest.newBuilder()
+                        .priority(priority)
+                        .allocationRequestId(allocationRequestIdCounter.incrementAndGet())
+                        .resourceSizing(ResourceSizing.newInstance(1, capability))
+                        .allocationTags(Collections.singleton("triton"))
+                        .build();
+                amRMClient.addSchedulingRequests(Collections.singletonList(schedulingRequest));
             }
         }
     }
@@ -182,23 +210,83 @@ public class ApplicationMaster {
             env.put("YARN_CONTAINER_RUNTIME_TYPE", "docker");
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_IMAGE", config.tritonImage);
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE", "true");
+            
+            // Add secrets to environment if available
+            if (config.secretsPath != null) {
+                try {
+                    Configuration secretConf = new Configuration(conf);
+                    String providerPath = config.secretsPath;
+                    if (!providerPath.contains("://")) {
+                        providerPath = "jceks://hdfs" + providerPath;
+                    } else if (providerPath.startsWith("hdfs://")) {
+                        providerPath = providerPath.replace("hdfs://", "jceks://hdfs");
+                    }
+                    secretConf.set("hadoop.security.credential.provider.path", providerPath);
+                    
+                    char[] hfToken = secretConf.getPassword("huggingface.token");
+                    if (hfToken != null) {
+                        env.put("HUGGING_FACE_HUB_TOKEN", new String(hfToken));
+                        log.info("Loaded Hugging Face token from secrets");
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to load secrets from {}: {}", config.secretsPath, e.getMessage());
+                }
+            }
+
             ctx.setEnvironment(env);
 
             String modelPath = "/models";
-            String tritonArgs = " --model-repository=" + modelPath + 
-                               " --http-port=" + config.tritonPort + 
-                               " --metrics-port=" + config.metricsPort +
-                               " --http-address=" + config.bindAddress +
-                               " --metrics-address=" + config.bindAddress;
-
-            String launchCommand;
+            int worldSize = config.tensorParallelism * config.pipelineParallelism;
+            
+            StringBuilder sb = new StringBuilder();
             if (config.modelRepositoryHdfs != null && !config.modelRepositoryHdfs.isEmpty()) {
-                launchCommand = "mkdir -p " + modelPath + " && " +
-                        "hadoop fs -copyToLocal " + config.modelRepositoryHdfs + "/* " + modelPath + " && " +
-                        "tritonserver" + tritonArgs;
-            } else {
-                launchCommand = "tritonserver" + tritonArgs;
+                sb.append("mkdir -p ").append(modelPath).append(" && ");
+                sb.append("hadoop fs -copyToLocal ").append(config.modelRepositoryHdfs).append("/* ").append(modelPath).append(" && ");
             }
+
+            if (config.secretsPath != null && !config.secretsPath.isEmpty()) {
+                sb.append("mkdir -p /secrets && ");
+                sb.append("hadoop fs -copyToLocal ").append(config.secretsPath).append(" /secrets/secrets.jks && ");
+            }
+
+            if (worldSize > 1) {
+                sb.append("mpirun --allow-run-as-root ");
+                for (int i = 0; i < worldSize; i++) {
+                    if (i > 0) sb.append(" : ");
+                    sb.append("-n 1 tritonserver ");
+                    sb.append("--id=rank").append(i).append(" ");
+                    sb.append("--model-repository=").append(modelPath).append(" ");
+                    sb.append("--backend-config=python,shm-region-prefix-name=rank").append(i).append("_ ");
+                    
+                    if (i == 0) {
+                        sb.append("--http-port=").append(config.tritonPort).append(" ");
+                        sb.append("--grpc-port=").append(config.grpcPort).append(" ");
+                        sb.append("--metrics-port=").append(config.metricsPort).append(" ");
+                        sb.append("--http-address=").append(config.bindAddress).append(" ");
+                        sb.append("--metrics-address=").append(config.bindAddress).append(" ");
+                        sb.append("--allow-cpu-metrics=false --allow-gpu-metrics=false --allow-metrics=true --metrics-interval-ms=1000 ");
+                        sb.append("--model-load-thread-count=2 --strict-readiness=true ");
+                    } else {
+                        sb.append("--http-port=").append(config.tritonPort + i * 10).append(" ");
+                        sb.append("--grpc-port=").append(config.grpcPort + i * 10).append(" ");
+                        sb.append("--allow-http=false --allow-grpc=false --allow-metrics=false ");
+                        sb.append("--log-info=false --log-warning=false --model-control-mode=explicit --load-model=tensorrt_llm ");
+                        sb.append("--model-load-thread-count=2 ");
+                    }
+                }
+            } else {
+                sb.append("tritonserver ")
+                  .append("--model-repository=").append(modelPath).append(" ")
+                  .append("--http-port=").append(config.tritonPort).append(" ")
+                  .append("--grpc-port=").append(config.grpcPort).append(" ")
+                  .append("--metrics-port=").append(config.metricsPort).append(" ")
+                  .append("--http-address=").append(config.bindAddress).append(" ")
+                  .append("--metrics-address=").append(config.bindAddress)
+                  .append(" --allow-cpu-metrics=false --allow-gpu-metrics=false --allow-metrics=true --metrics-interval-ms=1000")
+                  .append(" --model-load-thread-count=2 --strict-readiness=true");
+            }
+
+            String launchCommand = sb.toString();
 
             ctx.setCommands(Collections.singletonList(
                     launchCommand +
@@ -242,6 +330,46 @@ public class ApplicationMaster {
         @Override public void onUpdateContainerResourceError(ContainerId containerId, Throwable t) {}
         @Override public void onGetContainerStatusError(ContainerId containerId, Throwable t) {}
         @Override public void onStopContainerError(ContainerId containerId, Throwable t) {}
+    }
+
+    public List<Container> getRunningContainers() {
+        return runningContainers;
+    }
+
+    public List<String> getAvailableModels() {
+        List<String> models = new ArrayList<>();
+        try {
+            FileSystem fs = FileSystem.get(conf);
+            if (config.modelRepositoryHdfs != null) {
+                Path modelPath = new Path(config.modelRepositoryHdfs);
+                if (fs.exists(modelPath)) {
+                    FileStatus[] statuses = fs.listStatus(modelPath);
+                    for (FileStatus status : statuses) {
+                        if (status.isDirectory()) {
+                            models.add(status.getPath().getName());
+                        }
+                    }
+                }
+            }
+        } catch (IOException e) {
+            log.error("Failed to list models from HDFS", e);
+        }
+        return models;
+    }
+
+    public Resource getAvailableResources() {
+        if (amRMClient != null) {
+            return amRMClient.getAvailableResources();
+        }
+        return Resource.newInstance(0, 0);
+    }
+
+    public MetricsCollector getMetricsCollector() {
+        return metricsCollector;
+    }
+
+    public int getTargetNumContainers() {
+        return targetNumContainers.get();
     }
 
     public TarnConfig getConfig() {

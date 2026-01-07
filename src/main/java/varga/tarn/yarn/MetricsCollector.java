@@ -8,6 +8,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -29,6 +31,11 @@ public class MetricsCollector {
     }
 
     public double fetchContainerLoad(String host) {
+        String metrics = fetchRawMetrics(host);
+        return parseLoadFromMetrics(metrics);
+    }
+
+    public String fetchRawMetrics(String host) {
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("http://" + host + ":" + metricsPort + "/metrics"))
@@ -36,12 +43,45 @@ public class MetricsCollector {
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() == 200) {
-                return parseLoadFromMetrics(response.body());
+                return response.body();
             }
         } catch (Exception e) {
             log.warn("Failed to fetch metrics from {}: {}", host, e.getMessage());
         }
-        return 0.0;
+        return "";
+    }
+
+    public String fetchLoadedModels(String host, int tritonPort) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("http://" + host + ":" + tritonPort + "/v2/repository/index"))
+                    .POST(HttpRequest.BodyPublishers.noBody()) // Triton index is often a POST
+                    .timeout(Duration.ofSeconds(3))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 200) {
+                return response.body();
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch models from {}: {}", host, e.getMessage());
+        }
+        return "[]";
+    }
+
+    public Map<String, String> fetchGpuMetrics(String host) {
+        Map<String, String> gpuInfo = new LinkedHashMap<>();
+        String metrics = fetchRawMetrics(host);
+        if (metrics.isEmpty()) return gpuInfo;
+
+        Pattern p = Pattern.compile("(nv_gpu_[a-z_]+)\\{gpu=\"(\\d+)\"\\}\\s+([\\d.e+]+)");
+        Matcher m = p.matcher(metrics);
+        while (m.find()) {
+            String metric = m.group(1);
+            String gpu = m.group(2);
+            String value = m.group(3);
+            gpuInfo.put("GPU " + gpu + " " + metric.replace("nv_gpu_", ""), value);
+        }
+        return gpuInfo;
     }
 
     public double parseLoadFromMetrics(String metrics) {

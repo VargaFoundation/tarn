@@ -51,6 +51,7 @@ public class Client {
         String amPort = String.valueOf(config.amPort);
         String bindAddress = config.bindAddress;
         String token = config.apiToken;
+        String secretsPath = config.secretsPath;
 
         yarnClient.start();
         log.info("YARN Client started");
@@ -82,6 +83,11 @@ public class Client {
         if (!token.isEmpty()) {
             env.put("TARN_TOKEN", token);
         }
+        if (secretsPath != null) {
+            env.put("SECRETS_PATH", secretsPath);
+        }
+        env.put("TENSOR_PARALLELISM", String.valueOf(config.tensorParallelism));
+        env.put("PIPELINE_PARALLELISM", String.valueOf(config.pipelineParallelism));
         
         // Add classpath to environment
         StringBuilder classPathEnv = new StringBuilder(ApplicationConstants.Environment.CLASSPATH.$())
@@ -106,6 +112,9 @@ public class Client {
                         " --am-port " + amPort +
                         " --address " + bindAddress +
                         (token.isEmpty() ? "" : " --token " + token) +
+                        (secretsPath == null ? "" : " --secrets " + secretsPath) +
+                        " --tp " + config.tensorParallelism +
+                        " --pp " + config.pipelineParallelism +
                         " 1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stdout" +
                         " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stderr"
         );

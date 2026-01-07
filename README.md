@@ -17,6 +17,10 @@ The architecture is based on a native YARN application consisting of:
 - Horizontal auto-scaling managed by the Application Master.
 - Local model loading from HDFS (pre-download before Triton starts).
 - Service discovery for HAProxy.
+- **Monitoring Dashboard**: Web UI exposed by the AM to monitor cluster status, containers, and models (available at `http://AM_HOST:AM_PORT/dashboard`).
+- **Distributed Inference**: Support for multi-GPU inference using Tensor Parallelism (TP) and Pipeline Parallelism (PP).
+- **Anti-Affinity**: Ensures that YARN places at most one Triton container per node for optimal performance and isolation.
+- **Secret Management**: Support for JKS/JCEKS secret files on HDFS for sensitive data like Hugging Face tokens.
 - Support for Open Inference Protocol (OIP).
 
 ## Prerequisites
@@ -43,19 +47,25 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --metrics-port [metrics_port] \
   --am-port [am_port] \
   --address [bind_address] \
-  --token [security_token]
+  --token [security_token] \
+  --tp [tensor_parallelism] \
+  --pp [pipeline_parallelism] \
+  --secrets [hdfs_jks_path]
 ```
 
 Example:
 ```bash
 yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
-  --model-repository hdfs:///user/models/resnet50 \
+  --model-repository hdfs:///user/models/llama-3-8b \
   --image nvcr.io/nvidia/tritonserver:24.09-py3 \
   --port 8000 \
   --metrics-port 8002 \
   --am-port 8888 \
   --address 0.0.0.0 \
-  --token my-secret-token
+  --token my-secret-token \
+  --tp 2 \
+  --pp 1 \
+  --secrets hdfs:///user/secrets/hf.jceks
 ```
 
 ## Load Balancing and Service Discovery
