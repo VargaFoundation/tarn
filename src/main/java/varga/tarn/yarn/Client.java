@@ -35,32 +35,22 @@ public class Client {
     }
 
     public void run(String[] args) throws Exception {
-        Options options = new Options();
-        options.addOption("m", "model-repository", true, "HDFS path to model repository");
-        options.addOption("i", "image", true, "Triton Docker image");
-        options.addOption("p", "port", true, "Triton HTTP port (default 8000)");
-        options.addOption("mp", "metrics-port", true, "Triton metrics port (default 8002)");
-        options.addOption("ap", "am-port", true, "AM HTTP port (default 8888)");
-        options.addOption("a", "address", true, "Bind address (default 0.0.0.0)");
-        options.addOption("t", "token", true, "Security token for AM API");
-
-        CommandLineParser parser = new PosixParser();
-        CommandLine line;
+        TarnConfig config = new TarnConfig();
         try {
-            line = parser.parse(options, args);
+            config.parseArgs(args);
         } catch (ParseException exp) {
             HelpFormatter formatter = new HelpFormatter();
-            formatter.printHelp("yarn jar tarn.jar varga.tarn.yarn.Client", options);
+            formatter.printHelp("yarn jar tarn.jar varga.tarn.yarn.Client", TarnConfig.getOptions());
             throw exp;
         }
 
-        String modelHdfsPath = line.getOptionValue("model-repository", "hdfs:///models");
-        String tritonImage = line.getOptionValue("image", "nvcr.io/nvidia/tritonserver:24.09-py3");
-        String tritonPort = line.getOptionValue("port", "8000");
-        String metricsPort = line.getOptionValue("metrics-port", "8002");
-        String amPort = line.getOptionValue("am-port", "8888");
-        String bindAddress = line.getOptionValue("address", "0.0.0.0");
-        String token = line.getOptionValue("token", "");
+        String modelHdfsPath = config.modelRepositoryHdfs;
+        String tritonImage = config.tritonImage;
+        String tritonPort = String.valueOf(config.tritonPort);
+        String metricsPort = String.valueOf(config.metricsPort);
+        String amPort = String.valueOf(config.amPort);
+        String bindAddress = config.bindAddress;
+        String token = config.apiToken;
 
         yarnClient.start();
         log.info("YARN Client started");

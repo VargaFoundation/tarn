@@ -24,3 +24,5 @@ hs_err_pid*
 replay_pid*
 /SPEC.md
 /HELP.md
+/target/
+/dependency-reduced-pom.xml
