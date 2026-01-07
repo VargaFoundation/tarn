@@ -123,6 +123,9 @@ public class DiscoveryServer {
                     cm.put("id", c.getId().toString());
                     cm.put("host", c.getNodeId().getHost());
                     cm.put("load", am.getMetricsCollector().fetchContainerLoad(c.getNodeId().getHost()));
+                    cm.put("memory", c.getResource().getMemorySize());
+                    cm.put("vcores", c.getResource().getVirtualCores());
+                    cm.put("gpus", am.getMetricsCollector().fetchGpuMetricsStructured(c.getNodeId().getHost()));
                     containerModels.add(cm);
                 }
             }
@@ -131,11 +134,10 @@ public class DiscoveryServer {
             // HDFS Models
             model.put("availableModels", am.getAvailableModels());
 
-            // Samples from first container
+            // Samples for models (still useful but user wanted to remove GPU sample)
             if (!containers.isEmpty()) {
                 String firstHost = containers.get(0).getNodeId().getHost();
                 model.put("sampleHost", firstHost);
-                model.put("gpuMetrics", am.getMetricsCollector().fetchGpuMetrics(firstHost));
                 model.put("loadedModelsJson", am.getMetricsCollector().fetchLoadedModels(firstHost, config.tritonPort));
             }
 

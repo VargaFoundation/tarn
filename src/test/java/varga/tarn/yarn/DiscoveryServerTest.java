@@ -31,13 +31,17 @@ public class DiscoveryServerTest {
         when(mockNodeId.getHost()).thenReturn("host1");
         when(mockContainer.getNodeId()).thenReturn(mockNodeId);
         when(mockContainer.getId()).thenReturn(mockContainerId);
+        org.apache.hadoop.yarn.api.records.Resource mockResource = mock(org.apache.hadoop.yarn.api.records.Resource.class);
+        when(mockResource.getMemorySize()).thenReturn(4096L);
+        when(mockResource.getVirtualCores()).thenReturn(2);
+        when(mockContainer.getResource()).thenReturn(mockResource);
         containers.add(mockContainer);
 
         ApplicationMaster mockAm = mock(ApplicationMaster.class);
         MetricsCollector mockMetrics = mock(MetricsCollector.class);
         when(mockMetrics.fetchLoadedModels(anyString(), anyInt())).thenReturn("[]");
         when(mockMetrics.fetchContainerLoad(anyString())).thenReturn(0.5);
-        when(mockMetrics.fetchGpuMetrics(anyString())).thenReturn(new java.util.HashMap<>());
+        when(mockMetrics.fetchGpuMetricsStructured(anyString())).thenReturn(new java.util.HashMap<>());
         
         when(mockAm.getRunningContainers()).thenReturn(containers);
         when(mockAm.getAvailableModels()).thenReturn(new ArrayList<>());
@@ -75,6 +79,7 @@ public class DiscoveryServerTest {
             assertEquals(200, resp3.statusCode());
             assertTrue(resp3.body().contains("TARN Dashboard"));
             assertTrue(resp3.body().contains("host1"));
+            assertTrue(resp3.body().contains("4096 MB / 2 vCores"));
 
         } finally {
             server.stop();

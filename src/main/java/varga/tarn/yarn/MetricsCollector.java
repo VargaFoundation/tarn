@@ -68,20 +68,21 @@ public class MetricsCollector {
         return "[]";
     }
 
-    public Map<String, String> fetchGpuMetrics(String host) {
-        Map<String, String> gpuInfo = new LinkedHashMap<>();
+    public Map<String, Map<String, String>> fetchGpuMetricsStructured(String host) {
+        Map<String, Map<String, String>> gpus = new LinkedHashMap<>();
         String metrics = fetchRawMetrics(host);
-        if (metrics.isEmpty()) return gpuInfo;
+        if (metrics.isEmpty()) return gpus;
 
         Pattern p = Pattern.compile("(nv_gpu_[a-z_]+)\\{gpu=\"(\\d+)\"\\}\\s+([\\d.e+]+)");
         Matcher m = p.matcher(metrics);
         while (m.find()) {
-            String metric = m.group(1);
-            String gpu = m.group(2);
+            String metric = m.group(1).replace("nv_gpu_", "");
+            String gpuId = m.group(2);
             String value = m.group(3);
-            gpuInfo.put("GPU " + gpu + " " + metric.replace("nv_gpu_", ""), value);
+            
+            gpus.computeIfAbsent(gpuId, k -> new LinkedHashMap<>()).put(metric, value);
         }
-        return gpuInfo;
+        return gpus;
     }
 
     public double parseLoadFromMetrics(String metrics) {

@@ -14,19 +14,39 @@
 
     <h2>Global Resources (Available for AM)</h2>
     <ul>
-        <li>Memory: ${availableResources.memorySize} MB</li>
-        <li>vCores: ${availableResources.virtualCores}</li>
-        <li>Target Containers: ${targetNumContainers}</li>
+        <li>Memory: ${availableResources.memorySize?c} MB</li>
+        <li>vCores: ${availableResources.virtualCores?c}</li>
+        <li>Target Containers: ${targetNumContainers?c}</li>
     </ul>
 
     <h2>Running Containers</h2>
     <table>
-        <tr><th>Container ID</th><th>Host</th><th>Load</th><th>Status</th></tr>
+        <tr>
+            <th>Container ID</th>
+            <th>Host</th>
+            <th>Resources</th>
+            <th>Load</th>
+            <th>GPU Usage</th>
+            <th>Status</th>
+        </tr>
         <#list containers as c>
         <tr>
             <td>${c.id}</td>
             <td>${c.host}</td>
+            <td>${c.memory?c} MB / ${c.vcores?c} vCores</td>
             <td>${c.load?string["0.00%"]}</td>
+            <td>
+                <#if c.gpus?has_content>
+                    <#list c.gpus?keys as gpuId>
+                        <strong>GPU ${gpuId}:</strong> 
+                        utilization=${c.gpus[gpuId].utilization!0}%, 
+                        mem=${c.gpus[gpuId].memory_used!0}/${c.gpus[gpuId].memory_total!0}
+                        <br/>
+                    </#list>
+                <#else>
+                    N/A
+                </#if>
+            </td>
             <td>RUNNING</td>
         </tr>
         </#list>
@@ -40,17 +60,6 @@
     </ul>
 
     <#if sampleHost??>
-    <h2>GPU Details (Sample from ${sampleHost})</h2>
-    <#if gpuMetrics?has_content>
-    <ul>
-        <#list gpuMetrics?keys as key>
-        <li>${key}: ${gpuMetrics[key]}</li>
-        </#list>
-    </ul>
-    <#else>
-    <p>No GPU metrics available.</p>
-    </#if>
-
     <h2>Loaded Models (Sample from ${sampleHost})</h2>
     <pre>${loadedModelsJson}</pre>
     </#if>
