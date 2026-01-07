@@ -41,8 +41,116 @@ discover_am_host() {
 
 update_haproxy() {
     local instances=$1
-    echo "Updating HAProxy with instances: ${instances}"
-    # Logic to update HAProxy via Runtime API (socat)
+    if [ -z "$instances" ]; then
+        echo "No instances provided for update."
+        return
+    fi
+
+    # Check if socat is available
+    if ! command -v socat &> /dev/null; then
+        echo "Error: socat is not installed. Please install it to use dynamic HAProxy updates."
+        return
+    fi
+
+    # Convert newline-separated list to an array of desired instances
+    mapfile -t desired_list <<< "$instances"
+    local num_desired=${#desired_list[@]}
+    echo "Updating HAProxy to match $num_desired instances"
+
+    # Get current state from HAProxy using 'show servers state'
+    # Format version 1: srv_name is $4, srv_addr is $5, srv_port is $19, srv_admin_state is $7
+    local haproxy_data=$(echo "show servers state $BACKEND_NAME" | socat stdio unix-connect:"$HAPROXY_SOCKET" 2>/dev/null | grep -v "^#" | grep -v "^1$")
+    
+    if [ -z "$haproxy_data" ]; then
+        echo "Warning: Could not retrieve servers state from HAProxy (backend: $BACKEND_NAME)."
+        return
+    fi
+
+    # Arrays and Maps to track HAProxy state
+    local all_slots=()
+    declare -A slot_to_instance
+    declare -A slot_admin_state
+
+    while read -r line; do
+        [ -z "$line" ] && continue
+        local srv_name=$(echo "$line" | awk '{print $4}')
+        local srv_addr=$(echo "$line" | awk '{print $5}')
+        local srv_port=$(echo "$line" | awk '{print $19}')
+        local admin_state=$(echo "$line" | awk '{print $7}')
+        
+        all_slots+=("$srv_name")
+        slot_to_instance["$srv_name"]="$srv_addr:$srv_port"
+        slot_admin_state["$srv_name"]="$admin_state"
+    done <<< "$haproxy_data"
+
+    declare -A used_slots
+    local remaining_desired=()
+
+    # 1. Step 1: Identify instances already correctly mapped to a READY slot (admin_state 0)
+    for inst in "${desired_list[@]}"; do
+        local matched=0
+        for slot in "${all_slots[@]}"; do
+            if [ -z "${used_slots[$slot]}" ] && [ "${slot_to_instance[$slot]}" == "$inst" ] && [ "${slot_admin_state[$slot]}" == "0" ]; then
+                used_slots["$slot"]=1
+                echo "Instance $inst is already active in slot $slot."
+                matched=1
+                break
+            fi
+        done
+        if [ $matched -eq 0 ]; then
+            remaining_desired+=("$inst")
+        fi
+    done
+
+    # 2. Step 2: Identify instances already in a slot but currently in MAINT, and enable them
+    local still_to_add=()
+    for inst in "${remaining_desired[@]}"; do
+        local matched=0
+        for slot in "${all_slots[@]}"; do
+            if [ -z "${used_slots[$slot]}" ] && [ "${slot_to_instance[$slot]}" == "$inst" ]; then
+                echo "Enabling instance $inst in existing slot $slot."
+                echo "set server $BACKEND_NAME/$slot state ready" | socat stdio unix-connect:"$HAPROXY_SOCKET" > /dev/null
+                used_slots["$slot"]=1
+                matched=1
+                break
+            fi
+        done
+        if [ $matched -eq 0 ]; then
+            still_to_add+=("$inst")
+        fi
+    done
+
+    # 3. Step 3: Assign completely new instances to unused slots and put redundant slots in MAINT
+    local add_idx=0
+    for slot in "${all_slots[@]}"; do
+        if [ -z "${used_slots[$slot]}" ]; then
+            if [ $add_idx -lt ${#still_to_add[@]} ]; then
+                local inst="${still_to_add[$add_idx]}"
+                local host=$(echo "$inst" | cut -d':' -f1)
+                local port=$(echo "$inst" | cut -d':' -f2)
+                
+                echo "Assigning new instance $inst to slot $slot"
+                # Update address and port
+                echo "set server $BACKEND_NAME/$slot addr $host port $port" | socat stdio unix-connect:"$HAPROXY_SOCKET" > /dev/null
+                # Set state to ready
+                echo "set server $BACKEND_NAME/$slot state ready" | socat stdio unix-connect:"$HAPROXY_SOCKET" > /dev/null
+                
+                used_slots["$slot"]=1
+                add_idx=$((add_idx+1))
+            else
+                # Slot is not needed, set to maintenance if it's currently active
+                if [ "${slot_admin_state[$slot]}" != "1" ]; then
+                    echo "Setting unused slot $slot to maintenance."
+                    echo "set server $BACKEND_NAME/$slot state maint" | socat stdio unix-connect:"$HAPROXY_SOCKET" > /dev/null
+                fi
+            fi
+        fi
+    done
+
+    if [ $add_idx -lt ${#still_to_add[@]} ]; then
+        echo "Error: Not enough slots in HAProxy backend '$BACKEND_NAME' to accommodate all instances!"
+        echo "Missing $(( ${#still_to_add[@]} - add_idx )) slots."
+    fi
 }
 
 echo "Starting HAProxy dynamic update script..."

@@ -79,7 +79,18 @@ public class DiscoveryServerTest {
             assertEquals(200, resp3.statusCode());
             assertTrue(resp3.body().contains("TARN Dashboard"));
             assertTrue(resp3.body().contains("host1"));
-            assertTrue(resp3.body().contains("4096 MB / 2 vCores"));
+            assertTrue(resp3.body().contains("4096 MB"));
+            assertTrue(resp3.body().contains("2 vCores"));
+
+            // 4. Prometheus metrics request
+            HttpRequest req4 = HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/metrics?token=test-token"))
+                    .build();
+            HttpResponse<String> resp4 = client.send(req4, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, resp4.statusCode());
+            assertTrue(resp4.body().contains("tarn_target_containers"));
+            assertTrue(resp4.body().contains("tarn_running_containers 1"));
+            assertTrue(resp4.body().contains("tarn_container_load{container_id=\"container_123\",host=\"host1\"} 0.5"));
 
         } finally {
             server.stop();

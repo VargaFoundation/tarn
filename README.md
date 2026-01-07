@@ -18,6 +18,7 @@ The architecture is based on a native YARN application consisting of:
 - Local model loading from HDFS (pre-download before Triton starts).
 - Service discovery for HAProxy.
 - **Monitoring Dashboard**: Web UI exposed by the AM to monitor cluster status, containers, and models (available at `http://AM_HOST:AM_PORT/dashboard`).
+- **Prometheus Metrics**: Aggregated metrics endpoint for Grafana (available at `http://AM_HOST:AM_PORT/metrics`).
 - **Distributed Inference**: Support for multi-GPU inference using Tensor Parallelism (TP) and Pipeline Parallelism (PP).
 - **Anti-Affinity**: Ensures that YARN places at most one Triton container per node for optimal performance and isolation.
 - **Secret Management**: Support for JKS/JCEKS secret files on HDFS for sensitive data like Hugging Face tokens.
@@ -28,6 +29,7 @@ The architecture is based on a native YARN application consisting of:
 - Hadoop 3.3+ configured with Docker Runtime.
 - NVIDIA Drivers and NVIDIA Container Toolkit installed on NodeManagers.
 - Java 17 and Maven for building.
+- **socat** installed on the HAProxy node for dynamic updates.
 
 ## Build
 
@@ -98,3 +100,43 @@ TARN implements several security features:
 - **Dynamic Discovery**: Eliminates the need to hardcode IP addresses, reducing exposure.
 - **YARN Isolation**: Leverages YARN's multi-tenancy and Docker isolation.
 - **Kerberos Support**: Compatible with secured Hadoop clusters (ensure the discovery script has a valid ticket).
+
+## Deployment Examples
+
+### 1. Stable Diffusion (Image Generation)
+To deploy Stable Diffusion, you need to have the model repository structured correctly on HDFS.
+```bash
+yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
+  --model-repository hdfs:///models/stable-diffusion \
+  --image nvcr.io/nvidia/tritonserver:24.09-py3 \
+  --token secret-token
+```
+Ensure you have the Python backend dependencies installed in your custom Docker image if using the standard one isn't enough.
+
+### 2. ONNX Model (Quick Deploy)
+Deploying an ONNX model (e.g., ResNet-50) is straightforward:
+```bash
+yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
+  --model-repository hdfs:///models/onnx_resnet50 \
+  --image nvcr.io/nvidia/tritonserver:24.09-py3
+```
+
+### 3. PyTorch Model
+For PyTorch models (LibTorch), ensure the `model.pt` is in the correct version folder:
+```bash
+yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
+  --model-repository hdfs:///models/pytorch_densenet \
+  --image nvcr.io/nvidia/tritonserver:24.09-py3
+```
+
+## Monitoring with Grafana
+
+You can connect Grafana to the Application Master by adding a Prometheus data source pointing to:
+`http://<AM_HOST>:<AM_PORT>/metrics?token=<YOUR_TOKEN>`
+
+Available metrics:
+- `tarn_target_containers`: Target number of containers for scaling.
+- `tarn_running_containers`: Actual number of running containers.
+- `tarn_container_load`: Per-container load based on GPU or request activity.
+- `tarn_gpu_utilization`: Per-GPU utilization.
+- `tarn_gpu_memory_used`: Per-GPU memory usage.

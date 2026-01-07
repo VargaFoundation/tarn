@@ -43,6 +43,7 @@ public class DiscoveryServer {
 
         this.httpServer.createContext("/instances", new InstancesHandler());
         this.httpServer.createContext("/dashboard", new DashboardHandler());
+        this.httpServer.createContext("/metrics", new PrometheusHandler());
         this.httpServer.setExecutor(null);
     }
 
@@ -163,6 +164,54 @@ public class DiscoveryServer {
                 } catch (IOException io) {
                     log.error("Failed to send error response", io);
                 }
+            }
+        }
+    }
+
+    private class PrometheusHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!isAuthorized(exchange)) return;
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("# HELP tarn_target_containers Target number of containers\n");
+            sb.append("# TYPE tarn_target_containers gauge\n");
+            sb.append("tarn_target_containers ").append(am.getTargetNumContainers()).append("\n");
+
+            List<Container> containers = am.getRunningContainers();
+            sb.append("# HELP tarn_running_containers Number of running containers\n");
+            sb.append("# TYPE tarn_running_containers gauge\n");
+            sb.append("tarn_running_containers ").append(containers.size()).append("\n");
+
+            synchronized (containers) {
+                for (Container c : containers) {
+                    String host = c.getNodeId().getHost();
+                    String cid = c.getId().toString();
+                    double load = am.getMetricsCollector().fetchContainerLoad(host);
+                    
+                    sb.append("tarn_container_load{container_id=\"").append(cid).append("\",host=\"").append(host).append("\"} ").append(load).append("\n");
+                    
+                    Map<String, Map<String, String>> gpuMetrics = am.getMetricsCollector().fetchGpuMetricsStructured(host);
+                    for (Map.Entry<String, Map<String, String>> gpuEntry : gpuMetrics.entrySet()) {
+                        String gpuId = gpuEntry.getKey();
+                        for (Map.Entry<String, String> metricEntry : gpuEntry.getValue().entrySet()) {
+                            String metricName = metricEntry.getKey();
+                            String value = metricEntry.getValue();
+                            sb.append("tarn_gpu_").append(metricName)
+                              .append("{container_id=\"").append(cid)
+                              .append("\",host=\"").append(host)
+                              .append("\",gpu=\"").append(gpuId)
+                              .append("\"} ").append(value).append("\n");
+                        }
+                    }
+                }
+            }
+
+            String response = sb.toString();
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+            exchange.sendResponseHeaders(200, response.length());
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(response.getBytes());
             }
         }
     }
