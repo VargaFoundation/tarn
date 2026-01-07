@@ -36,18 +36,51 @@ mvn clean package
 To submit the application to YARN:
 
 ```bash
-yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client [hdfs_model_path] [triton_image]
+yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
+  --model-repository [hdfs_model_path] \
+  --image [triton_image] \
+  --port [triton_port] \
+  --am-port [am_port] \
+  --token [security_token]
 ```
 
 Example:
 ```bash
-yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client hdfs:///user/models/resnet50 nvcr.io/nvidia/tritonserver:24.09-py3
+yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
+  --model-repository hdfs:///user/models/resnet50 \
+  --image nvcr.io/nvidia/tritonserver:24.09-py3 \
+  --port 8000 \
+  --am-port 8888 \
+  --token my-secret-token
 ```
 
-## Load Balancing
+## Load Balancing and Service Discovery
 
-A script `scripts/update_haproxy.sh` is provided to update HAProxy configuration by querying the Application Master.
+The script `scripts/update_haproxy.sh` dynamically discovers the Application Master using the YARN CLI and updates HAProxy configuration via its Runtime API.
+
+### Usage
 
 ```bash
-./scripts/update_haproxy.sh <AM_HOST> <HAPROXY_SOCKET_PATH>
+./scripts/update_haproxy.sh <HAPROXY_SOCKET_PATH> <SECURITY_TOKEN>
 ```
+
+Example:
+```bash
+./scripts/update_haproxy.sh /var/run/haproxy.sock my-secret-token
+```
+
+### Running as a Service
+
+A systemd unit file is provided in `services/tarn-haproxy-updater.service`. To install it:
+1. Copy the script to `/usr/local/bin/update_haproxy.sh`.
+2. Copy the service file to `/etc/systemd/system/`.
+3. Update the `ExecStart` and `User` in the service file if necessary.
+4. Run `systemctl daemon-reload && systemctl enable --now tarn-haproxy-updater`.
+
+## Security
+
+TARN implements several security features:
+- **API Token**: The Application Master can be configured with a token to secure the service discovery endpoint.
+- **Dynamic Discovery**: Eliminates the need to hardcode IP addresses, reducing exposure.
+- **YARN Isolation**: Leverages YARN's multi-tenancy and Docker isolation.
+- **Kerberos Support**: Compatible with secured Hadoop clusters (ensure the discovery script has a valid ticket).

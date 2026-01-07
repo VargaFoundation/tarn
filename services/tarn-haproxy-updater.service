@@ -1,0 +1,17 @@
+[Unit]
+Description=TARN HAProxy Dynamic Updater
+After=network.target haproxy.service
+
+[Service]
+Type=simple
+User=haproxy
+Group=haproxy
+# Adjust the path to where the script is installed
+ExecStart=/usr/local/bin/update_haproxy.sh /var/run/haproxy.sock
+Restart=always
+RestartSec=10
+# Environment variables if needed, e.g., for YARN CLI
+# Environment=HADOOP_CONF_DIR=/etc/hadoop/conf
+
+[Install]
+WantedBy=multi-user.target

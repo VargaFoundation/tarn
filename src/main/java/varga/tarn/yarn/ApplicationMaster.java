@@ -1,5 +1,9 @@
 package varga.tarn.yarn;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
+import com.sun.net.httpserver.HttpServer;
+import org.apache.commons.cli.*;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.*;
@@ -11,15 +15,12 @@ import org.apache.hadoop.yarn.util.Records;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.nio.ByteBuffer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
-import com.sun.net.httpserver.HttpServer;
-import com.sun.net.httpserver.HttpHandler;
-import com.sun.net.httpserver.HttpExchange;
 
 /**
  * ApplicationMaster for Triton on YARN.
@@ -33,19 +34,57 @@ public class ApplicationMaster {
     private AMRMClientAsync<AMRMClient.ContainerRequest> amRMClient;
     private NMClientAsync nmClient;
     private HttpServer httpServer;
-    
+
     private AtomicInteger targetNumContainers = new AtomicInteger(1);
     private List<Container> runningContainers = Collections.synchronizedList(new ArrayList<>());
-    
-    // Configurations
-    private String tritonImage = System.getenv("TRITON_IMAGE") != null ? 
-            System.getenv("TRITON_IMAGE") : "nvcr.io/nvidia/tritonserver:24.09-py3";
-    private String modelRepositoryHdfs = System.getenv("MODEL_REPOSITORY_HDFS");
-    private int containerMemory = Integer.parseInt(System.getenv().getOrDefault("CONTAINER_MEMORY", "4096"));
-    private int containerVCores = Integer.parseInt(System.getenv().getOrDefault("CONTAINER_VCORES", "2"));
+
+    private String tritonImage;
+    private String modelRepositoryHdfs;
+    private int tritonPort;
+    private int amPort;
+    private String apiToken;
+    private int containerMemory;
+    private int containerVCores;
 
     public ApplicationMaster() {
         conf = new YarnConfiguration();
+        // Default values from environment or defaults
+        tritonImage = System.getenv("TRITON_IMAGE") != null ?
+                System.getenv("TRITON_IMAGE") : "nvcr.io/nvidia/tritonserver:24.09-py3";
+        modelRepositoryHdfs = System.getenv("MODEL_REPOSITORY_HDFS");
+        tritonPort = Integer.parseInt(System.getenv().getOrDefault("TRITON_PORT", "8000"));
+        amPort = Integer.parseInt(System.getenv().getOrDefault("AM_PORT", "8888"));
+        apiToken = System.getenv("TARN_TOKEN");
+        containerMemory = Integer.parseInt(System.getenv().getOrDefault("CONTAINER_MEMORY", "4096"));
+        containerVCores = Integer.parseInt(System.getenv().getOrDefault("CONTAINER_VCORES", "2"));
+    }
+
+    public void init(String[] args) throws ParseException {
+        Options options = new Options();
+        options.addOption("m", "model-repository", true, "HDFS path to model repository");
+        options.addOption("i", "image", true, "Triton Docker image");
+        options.addOption("p", "port", true, "Triton HTTP port");
+        options.addOption("ap", "am-port", true, "AM HTTP port");
+        options.addOption("t", "token", true, "Security token for API");
+
+        CommandLineParser parser = new PosixParser();
+        CommandLine line = parser.parse(options, args);
+
+        if (line.hasOption("model-repository")) {
+            modelRepositoryHdfs = line.getOptionValue("model-repository");
+        }
+        if (line.hasOption("image")) {
+            tritonImage = line.getOptionValue("image");
+        }
+        if (line.hasOption("port")) {
+            tritonPort = Integer.parseInt(line.getOptionValue("port"));
+        }
+        if (line.hasOption("am-port")) {
+            amPort = Integer.parseInt(line.getOptionValue("am-port"));
+        }
+        if (line.hasOption("token")) {
+            apiToken = line.getOptionValue("token");
+        }
     }
 
     public void run() throws Exception {
@@ -81,7 +120,7 @@ public class ApplicationMaster {
                 break;
             }
         }
-        
+
         // Cleanup
         amRMClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED, "Shutdown", "");
         amRMClient.stop();
@@ -90,14 +129,22 @@ public class ApplicationMaster {
     }
 
     private void startHttpServer() throws IOException {
-        httpServer = HttpServer.create(new InetSocketAddress(8888), 0);
+        httpServer = HttpServer.create(new InetSocketAddress(amPort), 0);
         httpServer.createContext("/instances", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
+                if (apiToken != null && !apiToken.isEmpty()) {
+                    String providedToken = exchange.getRequestHeaders().getFirst("X-TARN-Token");
+                    if (!apiToken.equals(providedToken)) {
+                        log.warn("Unauthorized access attempt to /instances from {}", exchange.getRemoteAddress());
+                        exchange.sendResponseHeaders(401, -1);
+                        return;
+                    }
+                }
                 StringBuilder sb = new StringBuilder();
                 synchronized (runningContainers) {
                     for (Container c : runningContainers) {
-                        sb.append(c.getNodeId().getHost()).append(":8000\n");
+                        sb.append(c.getNodeId().getHost()).append(":").append(tritonPort).append("\n");
                     }
                 }
                 String response = sb.toString();
@@ -116,7 +163,7 @@ public class ApplicationMaster {
     private void requestContainers() {
         int currentCount = runningContainers.size();
         int needed = targetNumContainers.get() - currentCount;
-        
+
         if (needed > 0) {
             log.info("Requesting {} additional containers", needed);
             Resource capability = Records.newRecord(Resource.class);
@@ -134,7 +181,7 @@ public class ApplicationMaster {
     private void monitorMetricsAndScale() {
         log.info("Monitoring instances... Current active: {}", runningContainers.size());
         double avgLoad = Math.random(); // Simulated
-        
+
         if (avgLoad > 0.7 && targetNumContainers.get() < 10) {
             log.info("High load detected ({}), scaling up...", avgLoad);
             targetNumContainers.incrementAndGet();
@@ -158,7 +205,7 @@ public class ApplicationMaster {
             for (Container container : containers) {
                 log.info("Container allocated: {}. Launching Triton...", container.getId());
                 ContainerLaunchContext ctx = Records.newRecord(ContainerLaunchContext.class);
-                
+
                 Map<String, String> env = new HashMap<>();
                 env.put("YARN_CONTAINER_RUNTIME_TYPE", "docker");
                 env.put("YARN_CONTAINER_RUNTIME_DOCKER_IMAGE", tritonImage);
@@ -167,18 +214,20 @@ public class ApplicationMaster {
 
                 String modelPath = "/models";
                 String launchCommand;
+                String tritonArgs = " --model-repository=" + modelPath + " --http-port=" + tritonPort;
+
                 if (modelRepositoryHdfs != null && !modelRepositoryHdfs.isEmpty()) {
                     launchCommand = "mkdir -p " + modelPath + " && " +
-                                    "hadoop fs -copyToLocal " + modelRepositoryHdfs + "/* " + modelPath + " && " +
-                                    "tritonserver --model-repository=" + modelPath;
+                            "hadoop fs -copyToLocal " + modelRepositoryHdfs + "/* " + modelPath + " && " +
+                            "tritonserver" + tritonArgs;
                 } else {
-                    launchCommand = "tritonserver --model-repository=" + modelPath;
+                    launchCommand = "tritonserver" + tritonArgs;
                 }
 
                 List<String> commands = Collections.singletonList(
-                    launchCommand +
-                    " 1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stdout" +
-                    " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stderr"
+                        launchCommand +
+                                " 1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stdout" +
+                                " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stderr"
                 );
                 ctx.setCommands(commands);
                 nmClient.startContainerAsync(container, ctx);
@@ -200,7 +249,8 @@ public class ApplicationMaster {
         }
 
         @Override
-        public void onNodesUpdated(List<NodeReport> updatedNodes) {}
+        public void onNodesUpdated(List<NodeReport> updatedNodes) {
+        }
 
         @Override
         public float getProgress() {
@@ -213,7 +263,8 @@ public class ApplicationMaster {
         }
 
         // Required by some Hadoop 3 versions
-        public void onContainersUpdated(List<UpdatedContainer> containers) {}
+        public void onContainersUpdated(List<UpdatedContainer> containers) {
+        }
     }
 
     /**
@@ -226,7 +277,8 @@ public class ApplicationMaster {
         }
 
         @Override
-        public void onContainerStatusReceived(ContainerId containerId, ContainerStatus containerStatus) {}
+        public void onContainerStatusReceived(ContainerId containerId, ContainerStatus containerStatus) {
+        }
 
         @Override
         public void onContainerStopped(ContainerId containerId) {
@@ -240,26 +292,33 @@ public class ApplicationMaster {
         }
 
         @Override
-        public void onContainerResourceIncreased(ContainerId containerId, Resource resource) {}
+        public void onContainerResourceIncreased(ContainerId containerId, Resource resource) {
+        }
 
         @Override
-        public void onContainerResourceUpdated(ContainerId containerId, Resource resource) {}
+        public void onContainerResourceUpdated(ContainerId containerId, Resource resource) {
+        }
 
         @Override
-        public void onIncreaseContainerResourceError(ContainerId containerId, Throwable t) {}
+        public void onIncreaseContainerResourceError(ContainerId containerId, Throwable t) {
+        }
 
         @Override
-        public void onUpdateContainerResourceError(ContainerId containerId, Throwable t) {}
+        public void onUpdateContainerResourceError(ContainerId containerId, Throwable t) {
+        }
 
         @Override
-        public void onGetContainerStatusError(ContainerId containerId, Throwable t) {}
+        public void onGetContainerStatusError(ContainerId containerId, Throwable t) {
+        }
 
         @Override
-        public void onStopContainerError(ContainerId containerId, Throwable t) {}
+        public void onStopContainerError(ContainerId containerId, Throwable t) {
+        }
     }
 
     public static void main(String[] args) throws Exception {
         ApplicationMaster am = new ApplicationMaster();
+        am.init(args);
         am.run();
     }
 }

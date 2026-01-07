@@ -1,0 +1,13 @@
+server:
+  port: 8080
+
+tarn:
+  yarn:
+    resourcemanager-url: http://resourcemanager:8088
+  prometheus:
+    url: http://prometheus:9090
+  hdfs:
+    uri: hdfs://namenode:9000
+  scaling:
+    latency-threshold: 500.0
+    poll-interval: 60000
