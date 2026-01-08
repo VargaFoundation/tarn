@@ -30,7 +30,12 @@ public class TarnConfigTest {
             "--docker-privileged",
             "--docker-delayed-removal",
             "--docker-mounts", "/tmp:/tmp",
-            "--docker-ports", "8000:8000,8001:8001"
+            "--docker-ports", "8000:8000,8001:8001",
+            "--scale-up", "0.9",
+            "--scale-down", "0.1",
+            "--min-instances", "2",
+            "--max-instances", "20",
+            "--cooldown", "30000"
         };
         config.parseArgs(args);
         
@@ -43,5 +48,10 @@ public class TarnConfigTest {
         assertTrue(config.dockerDelayedRemoval);
         assertEquals("/tmp:/tmp", config.dockerMounts);
         assertEquals("8000:8000,8001:8001", config.dockerPorts);
+        assertEquals(0.9, config.scaleUpThreshold);
+        assertEquals(0.1, config.scaleDownThreshold);
+        assertEquals(2, config.minContainers);
+        assertEquals(20, config.maxContainers);
+        assertEquals(30000L, config.scaleCooldownMs);
     }
 }

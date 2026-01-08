@@ -30,6 +30,19 @@ public class MetricsCollector {
         this.httpClient = httpClient;
     }
 
+    public boolean isContainerReady(String host, int tritonPort) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("http://" + host + ":" + tritonPort + "/v2/health/ready"))
+                    .timeout(Duration.ofSeconds(2))
+                    .build();
+            HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
+            return response.statusCode() == 200;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     public double fetchContainerLoad(String host) {
         String metrics = fetchRawMetrics(host);
         return parseLoadFromMetrics(metrics);

@@ -44,6 +44,7 @@ public class DiscoveryServer {
         this.httpServer.createContext("/instances", new InstancesHandler());
         this.httpServer.createContext("/dashboard", new DashboardHandler());
         this.httpServer.createContext("/metrics", new PrometheusHandler());
+        this.httpServer.createContext("/health", new GlobalHealthHandler());
         this.httpServer.setExecutor(null);
     }
 
@@ -124,6 +125,7 @@ public class DiscoveryServer {
                     cm.put("id", c.getId().toString());
                     cm.put("host", c.getNodeId().getHost());
                     cm.put("load", am.getMetricsCollector().fetchContainerLoad(c.getNodeId().getHost()));
+                    cm.put("ready", am.getMetricsCollector().isContainerReady(c.getNodeId().getHost(), config.tritonPort));
                     cm.put("memory", c.getResource().getMemorySize());
                     cm.put("vcores", c.getResource().getVirtualCores());
                     cm.put("gpus", am.getMetricsCollector().fetchGpuMetricsStructured(c.getNodeId().getHost()));
@@ -212,6 +214,37 @@ public class DiscoveryServer {
             exchange.sendResponseHeaders(200, response.length());
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(response.getBytes());
+            }
+        }
+    }
+
+    private class GlobalHealthHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            // No auth for health check typically, or same as metrics
+            List<Container> containers = am.getRunningContainers();
+            boolean atLeastOneReady = false;
+            synchronized (containers) {
+                for (Container c : containers) {
+                    if (am.getMetricsCollector().isContainerReady(c.getNodeId().getHost(), config.tritonPort)) {
+                        atLeastOneReady = true;
+                        break;
+                    }
+                }
+            }
+
+            if (atLeastOneReady) {
+                String response = "OK";
+                exchange.sendResponseHeaders(200, response.length());
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(response.getBytes());
+                }
+            } else {
+                String response = "NO_INSTANCES_READY";
+                exchange.sendResponseHeaders(503, response.length());
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(response.getBytes());
+                }
             }
         }
     }

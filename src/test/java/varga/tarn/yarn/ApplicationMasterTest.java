@@ -19,7 +19,8 @@ public class ApplicationMasterTest {
             "--image", "test-image", 
             "--model-repository", "hdfs://test",
             "--address", "127.0.0.1",
-            "--secrets", "hdfs:///path/to/secrets.jks"
+            "--secrets", "hdfs:///path/to/secrets.jks",
+            "--min-instances", "3"
         };
         am.init(args);
         
@@ -29,5 +30,6 @@ public class ApplicationMasterTest {
         assertEquals("test-image", config.tritonImage);
         assertEquals("hdfs://test", config.modelRepository);
         assertEquals("hdfs:///path/to/secrets.jks", config.secretsPath);
+        assertEquals(3, am.getTargetNumContainers());
     }
 }

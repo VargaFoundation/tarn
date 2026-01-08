@@ -22,6 +22,13 @@ public class TarnConfig {
     public boolean dockerDelayedRemoval;
     public String dockerMounts;
     public String dockerPorts;
+    
+    // Scaling properties
+    public double scaleUpThreshold;
+    public double scaleDownThreshold;
+    public int minContainers;
+    public int maxContainers;
+    public long scaleCooldownMs;
 
     public TarnConfig() {
         // Defaults from environment or static defaults
@@ -44,6 +51,12 @@ public class TarnConfig {
         dockerDelayedRemoval = Boolean.parseBoolean(getEnv("DOCKER_DELAYED_REMOVAL", "false"));
         dockerMounts = getEnv("DOCKER_MOUNTS", null);
         dockerPorts = getEnv("DOCKER_PORTS", null);
+        
+        scaleUpThreshold = Double.parseDouble(getEnv("SCALE_UP_THRESHOLD", "0.7"));
+        scaleDownThreshold = Double.parseDouble(getEnv("SCALE_DOWN_THRESHOLD", "0.2"));
+        minContainers = Integer.parseInt(getEnv("MIN_CONTAINERS", "1"));
+        maxContainers = Integer.parseInt(getEnv("MAX_CONTAINERS", "10"));
+        scaleCooldownMs = Long.parseLong(getEnv("SCALE_COOLDOWN_MS", "60000"));
     }
 
     private String getEnv(String key, String defaultValue) {
@@ -73,6 +86,12 @@ public class TarnConfig {
         if (line.hasOption("docker-delayed-removal")) dockerDelayedRemoval = true;
         if (line.hasOption("docker-mounts")) dockerMounts = line.getOptionValue("docker-mounts");
         if (line.hasOption("docker-ports")) dockerPorts = line.getOptionValue("docker-ports");
+        
+        if (line.hasOption("scale-up")) scaleUpThreshold = Double.parseDouble(line.getOptionValue("scale-up"));
+        if (line.hasOption("scale-down")) scaleDownThreshold = Double.parseDouble(line.getOptionValue("scale-down"));
+        if (line.hasOption("min-instances")) minContainers = Integer.parseInt(line.getOptionValue("min-instances"));
+        if (line.hasOption("max-instances")) maxContainers = Integer.parseInt(line.getOptionValue("max-instances"));
+        if (line.hasOption("cooldown")) scaleCooldownMs = Long.parseLong(line.getOptionValue("cooldown"));
     }
 
     public static Options getOptions() {
@@ -94,6 +113,12 @@ public class TarnConfig {
         options.addOption("ddr", "docker-delayed-removal", false, "Delayed removal of docker containers");
         options.addOption("dm", "docker-mounts", true, "Docker mounts (comma-separated)");
         options.addOption("dports", "docker-ports", true, "Docker port mapping (host_port:container_port,...)");
+        
+        options.addOption("su", "scale-up", true, "Scale up threshold (0.0-1.0)");
+        options.addOption("sd", "scale-down", true, "Scale down threshold (0.0-1.0)");
+        options.addOption("min", "min-instances", true, "Minimum number of instances");
+        options.addOption("max", "max-instances", true, "Maximum number of instances");
+        options.addOption("c", "cooldown", true, "Scale cooldown in ms");
         return options;
     }
 }

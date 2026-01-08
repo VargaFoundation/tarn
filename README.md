@@ -21,6 +21,8 @@ The architecture is based on a native YARN application consisting of:
 - **Prometheus Metrics**: Aggregated metrics endpoint for Grafana (available at `http://AM_HOST:AM_PORT/metrics`).
 - **Distributed Inference**: Support for multi-GPU inference using Tensor Parallelism (TP) and Pipeline Parallelism (PP).
 - **Anti-Affinity**: Ensures that YARN places at most one Triton container per node for optimal performance and isolation.
+- **High Availability**: Support for Application Master restart, recovering active containers from previous attempts.
+- **Health Monitoring**: Integrated health checks using Triton's `/v2/health/ready` endpoint.
 - **Secret Management**: Support for JKS/JCEKS secret files on HDFS for sensitive data like Hugging Face tokens.
 - **Model Storage**: Support for HDFS (with automatic copy) or NFS (direct access via NFS Gateway).
 - Support for Open Inference Protocol (OIP).
@@ -104,7 +106,12 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --tp [tensor_parallelism] \
   --pp [pipeline_parallelism] \
   --secrets [hdfs_jks_path] \
-  --placement-tag [tag]
+  --placement-tag [tag] \
+  --scale-up [threshold] \
+  --scale-down [threshold] \
+  --min-instances [count] \
+  --max-instances [count] \
+  --cooldown [ms]
 ```
 
 Example:
@@ -120,7 +127,12 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --tp 2 \
   --pp 1 \
   --secrets hdfs:///user/secrets/hf.jceks \
-  --placement-tag nvidia
+  --placement-tag nvidia \
+  --scale-up 0.8 \
+  --scale-down 0.2 \
+  --min-instances 2 \
+  --max-instances 8 \
+  --cooldown 120000
 ```
 
 ## Node Tagging and Placement

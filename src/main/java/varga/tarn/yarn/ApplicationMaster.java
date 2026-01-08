@@ -6,6 +6,7 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
+import org.apache.hadoop.yarn.api.protocolrecords.RegisterApplicationMasterResponse;
 import org.apache.hadoop.yarn.api.records.*;
 import org.apache.hadoop.yarn.api.resource.PlacementConstraint;
 import org.apache.hadoop.yarn.api.resource.PlacementConstraints;
@@ -34,8 +35,8 @@ public class ApplicationMaster {
 
     private final Configuration conf;
     private final TarnConfig config;
-    private final MetricsCollector metricsCollector;
-    private final ScalingPolicy scalingPolicy;
+    private MetricsCollector metricsCollector;
+    private ScalingPolicy scalingPolicy;
     private final List<Container> runningContainers = Collections.synchronizedList(new ArrayList<>());
     private final AtomicInteger targetNumContainers = new AtomicInteger(1);
     private final AtomicLong allocationRequestIdCounter = new AtomicLong(0);
@@ -48,12 +49,19 @@ public class ApplicationMaster {
     public ApplicationMaster() {
         this.conf = new YarnConfiguration();
         this.config = new TarnConfig();
-        this.metricsCollector = new MetricsCollector(config.metricsPort);
-        this.scalingPolicy = new ScalingPolicy();
     }
 
     public void init(String[] args) throws Exception {
         config.parseArgs(args);
+        this.metricsCollector = new MetricsCollector(config.metricsPort);
+        this.scalingPolicy = new ScalingPolicy(
+                config.scaleUpThreshold,
+                config.scaleDownThreshold,
+                config.minContainers,
+                config.maxContainers,
+                config.scaleCooldownMs
+        );
+        this.targetNumContainers.set(config.minContainers);
     }
 
     public void run() throws Exception {
@@ -83,8 +91,18 @@ public class ApplicationMaster {
         Map<Set<String>, PlacementConstraint> constraints = Collections.singletonMap(
                 Collections.singleton(config.placementTag), tritonConstraint);
 
-        amRMClient.registerApplicationMaster(appMasterHostname, config.amPort,
+        RegisterApplicationMasterResponse response = amRMClient.registerApplicationMaster(appMasterHostname, config.amPort,
                 "http://" + appMasterHostname + ":" + config.amPort, constraints);
+        
+        // Recover running containers if this is an AM restart
+        List<Container> previousContainers = response.getContainersFromPreviousAttempts();
+        if (previousContainers != null && !previousContainers.isEmpty()) {
+            log.info("Recovered {} containers from previous attempt", previousContainers.size());
+            for (Container c : previousContainers) {
+                runningContainers.add(c);
+            }
+        }
+
         log.info("ApplicationMaster registered with RM at {}:{} with anti-affinity constraints on tag '{}'", 
                 appMasterHostname, config.amPort, config.placementTag);
 
@@ -255,62 +273,16 @@ public class ApplicationMaster {
 
             ctx.setEnvironment(env);
 
-            String modelPath = "/models";
-            int worldSize = config.tensorParallelism * config.pipelineParallelism;
-            
-            StringBuilder sb = new StringBuilder();
-            if (config.modelRepository != null && !config.modelRepository.isEmpty()) {
-                if (config.modelRepository.startsWith("hdfs:///")) {
-                    sb.append("mkdir -p ").append(modelPath).append(" && ");
-                    sb.append("hadoop fs -copyToLocal ").append(config.modelRepository).append("/* ").append(modelPath).append(" && ");
-                } else if (config.modelRepository.startsWith("/")) {
-                    modelPath = config.modelRepository;
-                }
-            }
-
-            if (config.secretsPath != null && !config.secretsPath.isEmpty()) {
-                sb.append("mkdir -p /secrets && ");
-                sb.append("hadoop fs -copyToLocal ").append(config.secretsPath).append(" /secrets/secrets.jks && ");
-            }
-
-            if (worldSize > 1) {
-                sb.append("mpirun --allow-run-as-root ");
-                for (int i = 0; i < worldSize; i++) {
-                    if (i > 0) sb.append(" : ");
-                    sb.append("-n 1 tritonserver ");
-                    sb.append("--id=rank").append(i).append(" ");
-                    sb.append("--model-repository=").append(modelPath).append(" ");
-                    sb.append("--backend-config=python,shm-region-prefix-name=rank").append(i).append("_ ");
-                    
-                    if (i == 0) {
-                        sb.append("--http-port=").append(config.tritonPort).append(" ");
-                        sb.append("--grpc-port=").append(config.grpcPort).append(" ");
-                        sb.append("--metrics-port=").append(config.metricsPort).append(" ");
-                        sb.append("--http-address=").append(config.bindAddress).append(" ");
-                        sb.append("--metrics-address=").append(config.bindAddress).append(" ");
-                        sb.append("--allow-cpu-metrics=false --allow-gpu-metrics=false --allow-metrics=true --metrics-interval-ms=1000 ");
-                        sb.append("--model-load-thread-count=2 --strict-readiness=true ");
-                    } else {
-                        sb.append("--http-port=").append(config.tritonPort + i * 10).append(" ");
-                        sb.append("--grpc-port=").append(config.grpcPort + i * 10).append(" ");
-                        sb.append("--allow-http=false --allow-grpc=false --allow-metrics=false ");
-                        sb.append("--log-info=false --log-warning=false --model-control-mode=explicit --load-model=tensorrt_llm ");
-                        sb.append("--model-load-thread-count=2 ");
-                    }
-                }
-            } else {
-                sb.append("tritonserver ")
-                  .append("--model-repository=").append(modelPath).append(" ")
-                  .append("--http-port=").append(config.tritonPort).append(" ")
-                  .append("--grpc-port=").append(config.grpcPort).append(" ")
-                  .append("--metrics-port=").append(config.metricsPort).append(" ")
-                  .append("--http-address=").append(config.bindAddress).append(" ")
-                  .append("--metrics-address=").append(config.bindAddress)
-                  .append(" --allow-cpu-metrics=false --allow-gpu-metrics=false --allow-metrics=true --metrics-interval-ms=1000")
-                  .append(" --model-load-thread-count=2 --strict-readiness=true");
-            }
-
-            String launchCommand = sb.toString();
+            String launchCommand = new TritonCommandBuilder()
+                    .modelRepository(config.modelRepository)
+                    .httpPort(config.tritonPort)
+                    .grpcPort(config.grpcPort)
+                    .metricsPort(config.metricsPort)
+                    .bindAddress(config.bindAddress)
+                    .tensorParallelism(config.tensorParallelism)
+                    .pipelineParallelism(config.pipelineParallelism)
+                    .secretsPath(config.secretsPath)
+                    .build();
 
             ctx.setCommands(Collections.singletonList(
                     launchCommand +

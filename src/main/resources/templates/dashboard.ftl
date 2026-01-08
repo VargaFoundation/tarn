@@ -96,7 +96,11 @@
                                 </#if>
                             </td>
                             <td class="p-4 text-center">
-                                <span class="bg-green-900 text-green-300 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider">Running</span>
+                                <#if c.ready>
+                                    <span class="bg-green-900 text-green-300 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider">Ready</span>
+                                <#else>
+                                    <span class="bg-yellow-900 text-yellow-300 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider">Loading</span>
+                                </#if>
                             </td>
                         </tr>
                         </#list>
