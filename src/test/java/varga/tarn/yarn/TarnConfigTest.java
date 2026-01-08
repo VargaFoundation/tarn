@@ -35,7 +35,10 @@ public class TarnConfigTest {
             "--scale-down", "0.1",
             "--min-instances", "2",
             "--max-instances", "20",
-            "--cooldown", "30000"
+            "--cooldown", "30000",
+            "--jar", "target/tarn.jar",
+            "--env", "VAR1=VAL1",
+            "--env", "VAR2=VAL2"
         };
         config.parseArgs(args);
         
@@ -48,6 +51,9 @@ public class TarnConfigTest {
         assertTrue(config.dockerDelayedRemoval);
         assertEquals("/tmp:/tmp", config.dockerMounts);
         assertEquals("8000:8000,8001:8001", config.dockerPorts);
+        assertEquals("target/tarn.jar", config.jarPath);
+        assertEquals("VAL1", config.customEnv.get("VAR1"));
+        assertEquals("VAL2", config.customEnv.get("VAR2"));
         assertEquals(0.9, config.scaleUpThreshold);
         assertEquals(0.1, config.scaleDownThreshold);
         assertEquals(2, config.minContainers);

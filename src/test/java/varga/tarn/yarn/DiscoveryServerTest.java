@@ -92,6 +92,15 @@ public class DiscoveryServerTest {
             assertTrue(resp4.body().contains("tarn_running_containers 1"));
             assertTrue(resp4.body().contains("tarn_container_load{container_id=\"container_123\",host=\"host1\"} 0.5"));
 
+            // 5. Config request
+            HttpRequest req5 = HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/config?token=test-token"))
+                    .build();
+            HttpResponse<String> resp5 = client.send(req5, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, resp5.statusCode());
+            assertTrue(resp5.body().contains("tritonPort: 8000"));
+            assertTrue(resp5.body().contains("amPort:"));
+
         } finally {
             server.stop();
         }

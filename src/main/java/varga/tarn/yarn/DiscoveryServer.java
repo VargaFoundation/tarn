@@ -45,6 +45,7 @@ public class DiscoveryServer {
         this.httpServer.createContext("/dashboard", new DashboardHandler());
         this.httpServer.createContext("/metrics", new PrometheusHandler());
         this.httpServer.createContext("/health", new GlobalHealthHandler());
+        this.httpServer.createContext("/config", new ConfigHandler());
         this.httpServer.setExecutor(null);
     }
 
@@ -245,6 +246,49 @@ public class DiscoveryServer {
                 try (OutputStream os = exchange.getResponseBody()) {
                     os.write(response.getBytes());
                 }
+            }
+        }
+    }
+
+    private class ConfigHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!isAuthorized(exchange)) return;
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("modelRepository: ").append(config.modelRepository).append("\n");
+            sb.append("tritonImage: ").append(config.tritonImage).append("\n");
+            sb.append("tritonPort: ").append(config.tritonPort).append("\n");
+            sb.append("grpcPort: ").append(config.grpcPort).append("\n");
+            sb.append("metricsPort: ").append(config.metricsPort).append("\n");
+            sb.append("amPort: ").append(config.amPort).append("\n");
+            sb.append("bindAddress: ").append(config.bindAddress).append("\n");
+            sb.append("containerMemory: ").append(config.containerMemory).append("\n");
+            sb.append("containerVCores: ").append(config.containerVCores).append("\n");
+            sb.append("tensorParallelism: ").append(config.tensorParallelism).append("\n");
+            sb.append("pipelineParallelism: ").append(config.pipelineParallelism).append("\n");
+            sb.append("placementTag: ").append(config.placementTag).append("\n");
+            sb.append("dockerNetwork: ").append(config.dockerNetwork).append("\n");
+            sb.append("dockerPrivileged: ").append(config.dockerPrivileged).append("\n");
+            sb.append("dockerDelayedRemoval: ").append(config.dockerDelayedRemoval).append("\n");
+            sb.append("scaleUpThreshold: ").append(config.scaleUpThreshold).append("\n");
+            sb.append("scaleDownThreshold: ").append(config.scaleDownThreshold).append("\n");
+            sb.append("minContainers: ").append(config.minContainers).append("\n");
+            sb.append("maxContainers: ").append(config.maxContainers).append("\n");
+            sb.append("scaleCooldownMs: ").append(config.scaleCooldownMs).append("\n");
+            
+            if (!config.customEnv.isEmpty()) {
+                sb.append("\nCustom Environment:\n");
+                for (Map.Entry<String, String> entry : config.customEnv.entrySet()) {
+                    sb.append("  ").append(entry.getKey()).append("=").append(entry.getValue()).append("\n");
+                }
+            }
+
+            String response = sb.toString();
+            exchange.getResponseHeaders().set("Content-Type", "text/plain");
+            exchange.sendResponseHeaders(200, response.length());
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(response.getBytes());
             }
         }
     }

@@ -111,13 +111,15 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --scale-down [threshold] \
   --min-instances [count] \
   --max-instances [count] \
-  --cooldown [ms]
+  --cooldown [ms] \
+  --jar [local_jar_path] \
+  --env KEY1=VALUE1 --env KEY2=VALUE2
 ```
 
 Example:
 ```bash
 yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
-  --model-repository hdfs:///user/models/llama-3-8b \
+  --model-repository hdfs:///user/models \
   --image nvcr.io/nvidia/tritonserver:24.09-py3 \
   --port 8000 \
   --metrics-port 8002 \
@@ -132,7 +134,9 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --scale-down 0.2 \
   --min-instances 2 \
   --max-instances 8 \
-  --cooldown 120000
+  --cooldown 120000 \
+  --jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar \
+  --env TRITON_LOG_VERBOSE=1
 ```
 
 ## Node Tagging and Placement

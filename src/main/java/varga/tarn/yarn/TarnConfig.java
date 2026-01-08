@@ -1,6 +1,8 @@
 package varga.tarn.yarn;
 
 import org.apache.commons.cli.*;
+import java.util.HashMap;
+import java.util.Map;
 
 public class TarnConfig {
     public String modelRepository;
@@ -22,6 +24,8 @@ public class TarnConfig {
     public boolean dockerDelayedRemoval;
     public String dockerMounts;
     public String dockerPorts;
+    public String jarPath;
+    public Map<String, String> customEnv = new HashMap<>();
     
     // Scaling properties
     public double scaleUpThreshold;
@@ -86,6 +90,16 @@ public class TarnConfig {
         if (line.hasOption("docker-delayed-removal")) dockerDelayedRemoval = true;
         if (line.hasOption("docker-mounts")) dockerMounts = line.getOptionValue("docker-mounts");
         if (line.hasOption("docker-ports")) dockerPorts = line.getOptionValue("docker-ports");
+        if (line.hasOption("jar")) jarPath = line.getOptionValue("jar");
+        if (line.hasOption("env")) {
+            String[] envs = line.getOptionValues("env");
+            for (String env : envs) {
+                int index = env.indexOf('=');
+                if (index > 0) {
+                    customEnv.put(env.substring(0, index), env.substring(index + 1));
+                }
+            }
+        }
         
         if (line.hasOption("scale-up")) scaleUpThreshold = Double.parseDouble(line.getOptionValue("scale-up"));
         if (line.hasOption("scale-down")) scaleDownThreshold = Double.parseDouble(line.getOptionValue("scale-down"));
@@ -113,6 +127,11 @@ public class TarnConfig {
         options.addOption("ddr", "docker-delayed-removal", false, "Delayed removal of docker containers");
         options.addOption("dm", "docker-mounts", true, "Docker mounts (comma-separated)");
         options.addOption("dports", "docker-ports", true, "Docker port mapping (host_port:container_port,...)");
+        options.addOption("j", "jar", true, "Path to the application JAR (local, will be uploaded to HDFS)");
+        
+        Option envOption = new Option("e", "env", true, "Custom environment variables (KEY=VALUE)");
+        envOption.setArgs(Option.UNLIMITED_VALUES);
+        options.addOption(envOption);
         
         options.addOption("su", "scale-up", true, "Scale up threshold (0.0-1.0)");
         options.addOption("sd", "scale-down", true, "Scale down threshold (0.0-1.0)");

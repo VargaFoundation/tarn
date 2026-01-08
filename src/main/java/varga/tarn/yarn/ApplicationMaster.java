@@ -246,6 +246,12 @@ public class ApplicationMaster {
             if (config.dockerPorts != null && !config.dockerPorts.isEmpty()) {
                 env.put("YARN_CONTAINER_RUNTIME_DOCKER_PORTS_MAPPING", config.dockerPorts);
             }
+            
+            // Apply custom environment variables
+            for (Map.Entry<String, String> entry : config.customEnv.entrySet()) {
+                env.put(entry.getKey(), entry.getValue());
+            }
+
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_CONTAINER_HOSTNAME", container.getId().toString());
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS", "true");
             
@@ -295,7 +301,8 @@ public class ApplicationMaster {
         @Override
         public void onContainersCompleted(List<ContainerStatus> statuses) {
             for (ContainerStatus status : statuses) {
-                log.info("Container completed: {}", status.getContainerId());
+                log.info("Container completed: {}. State: {}. Exit Status: {}. Diagnostics: {}", 
+                        status.getContainerId(), status.getState(), status.getExitStatus(), status.getDiagnostics());
                 runningContainers.removeIf(c -> c.getId().equals(status.getContainerId()));
             }
         }

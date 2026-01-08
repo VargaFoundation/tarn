@@ -1,6 +1,9 @@
 package varga.tarn.yarn;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.*;
 import org.apache.hadoop.yarn.client.api.YarnClient;
@@ -9,6 +12,7 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.commons.cli.*;
 
+import java.io.IOException;
 import java.util.*;
 
 import org.slf4j.Logger;
@@ -107,41 +111,68 @@ public class Client {
         amContainer.setEnvironment(env);
 
         // Command to launch the ApplicationMaster
-        List<String> commands = Collections.singletonList(
-                ApplicationConstants.Environment.JAVA_HOME.$() + "/bin/java" +
-                        " -Xmx512m" +
-                        " varga.tarn.yarn.ApplicationMaster" +
-                        " --model-repository " + modelPath +
-                        " --image " + tritonImage +
-                        " --port " + tritonPort +
-                        " --metrics-port " + metricsPort +
-                        " --am-port " + amPort +
-                        " --address " + bindAddress +
-                        (token.isEmpty() ? "" : " --token " + token) +
-                        (secretsPath == null ? "" : " --secrets " + secretsPath) +
-                        " --tp " + config.tensorParallelism +
-                        " --pp " + config.pipelineParallelism +
-                        " --placement-tag " + config.placementTag +
-                        " --docker-network " + config.dockerNetwork +
-                        (config.dockerPrivileged ? " --docker-privileged" : "") +
-                        (config.dockerDelayedRemoval ? " --docker-delayed-removal" : "") +
-                        (config.dockerMounts == null ? "" : " --docker-mounts " + config.dockerMounts) +
-                        (config.dockerPorts == null ? "" : " --docker-ports " + config.dockerPorts) +
-                        " 1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stdout" +
-                        " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stderr"
-        );
-        amContainer.setCommands(commands);
+        StringBuilder amCommand = new StringBuilder();
+        amCommand.append(ApplicationConstants.Environment.JAVA_HOME.$()).append("/bin/java")
+                .append(" -Xmx512m")
+                .append(" varga.tarn.yarn.ApplicationMaster")
+                .append(" --model-repository ").append(modelPath)
+                .append(" --image ").append(tritonImage)
+                .append(" --port ").append(tritonPort)
+                .append(" --metrics-port ").append(metricsPort)
+                .append(" --am-port ").append(amPort)
+                .append(" --address ").append(bindAddress);
 
-        // In a production environment, the application JAR would be uploaded to HDFS 
-        // and added here as a LocalResource. 
-        // For this implementation, we assume the JAR is already available or handled by YARN.
+        if (!token.isEmpty()) amCommand.append(" --token ").append(token);
+        if (secretsPath != null) amCommand.append(" --secrets ").append(secretsPath);
+
+        amCommand.append(" --tp ").append(config.tensorParallelism)
+                .append(" --pp ").append(config.pipelineParallelism)
+                .append(" --placement-tag ").append(config.placementTag)
+                .append(" --docker-network ").append(config.dockerNetwork);
+
+        if (config.dockerPrivileged) amCommand.append(" --docker-privileged");
+        if (config.dockerDelayedRemoval) amCommand.append(" --docker-delayed-removal");
+        if (config.dockerMounts != null) amCommand.append(" --docker-mounts ").append(config.dockerMounts);
+        if (config.dockerPorts != null) amCommand.append(" --docker-ports ").append(config.dockerPorts);
+
+        for (Map.Entry<String, String> entry : config.customEnv.entrySet()) {
+            amCommand.append(" --env ").append(entry.getKey()).append("=").append(entry.getValue());
+        }
+
+        amCommand.append(" 1>").append(ApplicationConstants.LOG_DIR_EXPANSION_VAR).append("/AppMaster.stdout")
+                .append(" 2>").append(ApplicationConstants.LOG_DIR_EXPANSION_VAR).append("/AppMaster.stderr");
+
+        amContainer.setCommands(Collections.singletonList(amCommand.toString()));
+
+        // Handle application JAR
         Map<String, LocalResource> localResources = new HashMap<>();
+        if (config.jarPath != null && !config.jarPath.isEmpty()) {
+            setupAppJar(new Path(config.jarPath), localResources, appId);
+        }
         amContainer.setLocalResources(localResources);
 
         appContext.setAMContainerSpec(amContainer);
 
         log.info("Submitting application {} to ResourceManager", appId);
         yarnClient.submitApplication(appContext);
+    }
+
+    private void setupAppJar(Path jarPath, Map<String, LocalResource> localResources, ApplicationId appId) throws IOException {
+        FileSystem fs = FileSystem.get(conf);
+        Path destPath = new Path(fs.getHomeDirectory(), ".tarn/jars/" + appId.toString() + "/tarn.jar");
+        
+        log.info("Uploading JAR from {} to {}", jarPath, destPath);
+        fs.copyFromLocalFile(false, true, jarPath, destPath);
+        
+        FileStatus destStatus = fs.getFileStatus(destPath);
+        LocalResource jarResource = Records.newRecord(LocalResource.class);
+        jarResource.setResource(URL.fromPath(destPath));
+        jarResource.setSize(destStatus.getLen());
+        jarResource.setTimestamp(destStatus.getModificationTime());
+        jarResource.setType(LocalResourceType.FILE);
+        jarResource.setVisibility(LocalResourceVisibility.APPLICATION);
+        
+        localResources.put("tarn.jar", jarResource);
     }
 
     public static void main(String[] args) throws Exception {
