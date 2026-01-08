@@ -1,9 +1,6 @@
 package varga.tarn.yarn;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.*;
 import org.apache.hadoop.yarn.client.api.YarnClient;
@@ -12,7 +9,6 @@ import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.commons.cli.*;
 
-import java.io.IOException;
 import java.util.*;
 
 import org.slf4j.Logger;
@@ -44,7 +40,7 @@ public class Client {
             throw exp;
         }
 
-        String modelHdfsPath = config.modelRepositoryHdfs;
+        String modelPath = config.modelRepository;
         String tritonImage = config.tritonImage;
         String tritonPort = String.valueOf(config.tritonPort);
         String metricsPort = String.valueOf(config.metricsPort);
@@ -74,7 +70,7 @@ public class Client {
 
         // Environment variables for the AM
         Map<String, String> env = new HashMap<>();
-        env.put("MODEL_REPOSITORY_HDFS", modelHdfsPath);
+        env.put("MODEL_REPOSITORY", modelPath);
         env.put("TRITON_IMAGE", tritonImage);
         env.put("TRITON_PORT", tritonPort);
         env.put("METRICS_PORT", metricsPort);
@@ -115,7 +111,7 @@ public class Client {
                 ApplicationConstants.Environment.JAVA_HOME.$() + "/bin/java" +
                         " -Xmx512m" +
                         " varga.tarn.yarn.ApplicationMaster" +
-                        " --model-repository " + modelHdfsPath +
+                        " --model-repository " + modelPath +
                         " --image " + tritonImage +
                         " --port " + tritonPort +
                         " --metrics-port " + metricsPort +

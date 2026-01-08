@@ -1,11 +1,9 @@
 package varga.tarn.yarn;
 
 import org.apache.commons.cli.*;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
-import java.util.Map;
 
 public class TarnConfig {
-    public String modelRepositoryHdfs;
+    public String modelRepository;
     public String tritonImage;
     public int tritonPort;
     public int grpcPort;
@@ -28,7 +26,7 @@ public class TarnConfig {
     public TarnConfig() {
         // Defaults from environment or static defaults
         tritonImage = getEnv("TRITON_IMAGE", "nvcr.io/nvidia/tritonserver:24.09-py3");
-        modelRepositoryHdfs = getEnv("MODEL_REPOSITORY_HDFS", "hdfs:///models");
+        modelRepository = getEnv("MODEL_REPOSITORY", "hdfs:///models");
         tritonPort = Integer.parseInt(getEnv("TRITON_PORT", "8000"));
         grpcPort = Integer.parseInt(getEnv("GRPC_PORT", "8001"));
         metricsPort = Integer.parseInt(getEnv("METRICS_PORT", "8002"));
@@ -58,7 +56,7 @@ public class TarnConfig {
         CommandLineParser parser = new PosixParser();
         CommandLine line = parser.parse(options, args);
 
-        if (line.hasOption("model-repository")) modelRepositoryHdfs = line.getOptionValue("model-repository");
+        if (line.hasOption("model-repository")) modelRepository = line.getOptionValue("model-repository");
         if (line.hasOption("image")) tritonImage = line.getOptionValue("image");
         if (line.hasOption("port")) tritonPort = Integer.parseInt(line.getOptionValue("port"));
         if (line.hasOption("grpc-port")) grpcPort = Integer.parseInt(line.getOptionValue("grpc-port"));
@@ -79,7 +77,7 @@ public class TarnConfig {
 
     public static Options getOptions() {
         Options options = new Options();
-        options.addOption("m", "model-repository", true, "HDFS path to model repository");
+        options.addOption("m", "model-repository", true, "Path to model repository (hdfs:///... or /...)");
         options.addOption("i", "image", true, "Triton Docker image");
         options.addOption("p", "port", true, "Triton HTTP port");
         options.addOption("gp", "grpc-port", true, "Triton GRPC port");

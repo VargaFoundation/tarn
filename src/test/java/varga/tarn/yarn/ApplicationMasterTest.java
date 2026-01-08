@@ -27,7 +27,7 @@ public class ApplicationMasterTest {
         assertEquals("127.0.0.1", config.bindAddress);
         assertEquals(9000, config.tritonPort);
         assertEquals("test-image", config.tritonImage);
-        assertEquals("hdfs://test", config.modelRepositoryHdfs);
+        assertEquals("hdfs://test", config.modelRepository);
         assertEquals("hdfs:///path/to/secrets.jks", config.secretsPath);
     }
 }

@@ -259,9 +259,13 @@ public class ApplicationMaster {
             int worldSize = config.tensorParallelism * config.pipelineParallelism;
             
             StringBuilder sb = new StringBuilder();
-            if (config.modelRepositoryHdfs != null && !config.modelRepositoryHdfs.isEmpty()) {
-                sb.append("mkdir -p ").append(modelPath).append(" && ");
-                sb.append("hadoop fs -copyToLocal ").append(config.modelRepositoryHdfs).append("/* ").append(modelPath).append(" && ");
+            if (config.modelRepository != null && !config.modelRepository.isEmpty()) {
+                if (config.modelRepository.startsWith("hdfs:///")) {
+                    sb.append("mkdir -p ").append(modelPath).append(" && ");
+                    sb.append("hadoop fs -copyToLocal ").append(config.modelRepository).append("/* ").append(modelPath).append(" && ");
+                } else if (config.modelRepository.startsWith("/")) {
+                    modelPath = config.modelRepository;
+                }
             }
 
             if (config.secretsPath != null && !config.secretsPath.isEmpty()) {
@@ -359,9 +363,9 @@ public class ApplicationMaster {
     public List<String> getAvailableModels() {
         List<String> models = new ArrayList<>();
         try {
-            FileSystem fs = FileSystem.get(conf);
-            if (config.modelRepositoryHdfs != null) {
-                Path modelPath = new Path(config.modelRepositoryHdfs);
+            if (config.modelRepository != null) {
+                Path modelPath = new Path(config.modelRepository);
+                FileSystem fs = modelPath.getFileSystem(conf);
                 if (fs.exists(modelPath)) {
                     FileStatus[] statuses = fs.listStatus(modelPath);
                     for (FileStatus status : statuses) {
@@ -372,7 +376,7 @@ public class ApplicationMaster {
                 }
             }
         } catch (IOException e) {
-            log.error("Failed to list models from HDFS", e);
+            log.error("Failed to list models from repository", e);
         }
         return models;
     }
