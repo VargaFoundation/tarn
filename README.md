@@ -86,8 +86,43 @@ Now you can point TARN to your models using the local mount path:
 
 ## Build
 
+Standard build using default Maven repositories:
+
 ```bash
 mvn clean package
+```
+
+### Building with Enterprise Distributions (ODP by Clemlab, Cloudera...)
+
+If you are using enterprise distributions like **ODP** (Open Source Data Platform) by **Clemlab**, or **Cloudera**, you need to configure specific Maven repositories to fetch the distribution-specific Hadoop binaries.
+
+#### 1. Configure Repositories
+
+Add the ODP public repository to your `pom.xml` or your `~/.m2/settings.xml`:
+
+```xml
+<repositories>
+    <repository>
+        <id>odp-public</id>
+        <url>https://repo.opensourcedataplatform.com/repository/maven-public/</url>
+    </repository>
+</repositories>
+```
+
+#### 2. Specify Distribution Version
+
+You should align the `hadoop.version` with your distribution's version. You can do this by overriding the property during the build:
+
+```bash
+mvn clean package -Dhadoop.version=3.3.6.1.2.4.0-32
+```
+
+#### 3. Testing with Distribution Binaries
+
+To run tests using the distribution-specific dependencies:
+
+```bash
+mvn test -Dhadoop.version=3.3.6.1.2.4.0-32
 ```
 
 ## Deployment
