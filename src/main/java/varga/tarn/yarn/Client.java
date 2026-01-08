@@ -88,6 +88,16 @@ public class Client {
         }
         env.put("TENSOR_PARALLELISM", String.valueOf(config.tensorParallelism));
         env.put("PIPELINE_PARALLELISM", String.valueOf(config.pipelineParallelism));
+        env.put("PLACEMENT_TAG", config.placementTag);
+        env.put("DOCKER_NETWORK", config.dockerNetwork);
+        env.put("DOCKER_PRIVILEGED", String.valueOf(config.dockerPrivileged));
+        env.put("DOCKER_DELAYED_REMOVAL", String.valueOf(config.dockerDelayedRemoval));
+        if (config.dockerMounts != null) {
+            env.put("DOCKER_MOUNTS", config.dockerMounts);
+        }
+        if (config.dockerPorts != null) {
+            env.put("DOCKER_PORTS", config.dockerPorts);
+        }
         
         // Add classpath to environment
         StringBuilder classPathEnv = new StringBuilder(ApplicationConstants.Environment.CLASSPATH.$())
@@ -115,6 +125,12 @@ public class Client {
                         (secretsPath == null ? "" : " --secrets " + secretsPath) +
                         " --tp " + config.tensorParallelism +
                         " --pp " + config.pipelineParallelism +
+                        " --placement-tag " + config.placementTag +
+                        " --docker-network " + config.dockerNetwork +
+                        (config.dockerPrivileged ? " --docker-privileged" : "") +
+                        (config.dockerDelayedRemoval ? " --docker-delayed-removal" : "") +
+                        (config.dockerMounts == null ? "" : " --docker-mounts " + config.dockerMounts) +
+                        (config.dockerPorts == null ? "" : " --docker-ports " + config.dockerPorts) +
                         " 1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stdout" +
                         " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/AppMaster.stderr"
         );

@@ -18,6 +18,12 @@ public class TarnConfig {
     public int tensorParallelism;
     public int pipelineParallelism;
     public String secretsPath;
+    public String placementTag;
+    public String dockerNetwork;
+    public boolean dockerPrivileged;
+    public boolean dockerDelayedRemoval;
+    public String dockerMounts;
+    public String dockerPorts;
 
     public TarnConfig() {
         // Defaults from environment or static defaults
@@ -34,6 +40,12 @@ public class TarnConfig {
         tensorParallelism = Integer.parseInt(getEnv("TENSOR_PARALLELISM", "1"));
         pipelineParallelism = Integer.parseInt(getEnv("PIPELINE_PARALLELISM", "1"));
         secretsPath = getEnv("SECRETS_PATH", null);
+        placementTag = getEnv("PLACEMENT_TAG", "nvidia");
+        dockerNetwork = getEnv("DOCKER_NETWORK", "host");
+        dockerPrivileged = Boolean.parseBoolean(getEnv("DOCKER_PRIVILEGED", "false"));
+        dockerDelayedRemoval = Boolean.parseBoolean(getEnv("DOCKER_DELAYED_REMOVAL", "false"));
+        dockerMounts = getEnv("DOCKER_MOUNTS", null);
+        dockerPorts = getEnv("DOCKER_PORTS", null);
     }
 
     private String getEnv(String key, String defaultValue) {
@@ -57,6 +69,12 @@ public class TarnConfig {
         if (line.hasOption("tp")) tensorParallelism = Integer.parseInt(line.getOptionValue("tp"));
         if (line.hasOption("pp")) pipelineParallelism = Integer.parseInt(line.getOptionValue("pp"));
         if (line.hasOption("secrets")) secretsPath = line.getOptionValue("secrets");
+        if (line.hasOption("placement-tag")) placementTag = line.getOptionValue("placement-tag");
+        if (line.hasOption("docker-network")) dockerNetwork = line.getOptionValue("docker-network");
+        if (line.hasOption("docker-privileged")) dockerPrivileged = true;
+        if (line.hasOption("docker-delayed-removal")) dockerDelayedRemoval = true;
+        if (line.hasOption("docker-mounts")) dockerMounts = line.getOptionValue("docker-mounts");
+        if (line.hasOption("docker-ports")) dockerPorts = line.getOptionValue("docker-ports");
     }
 
     public static Options getOptions() {
@@ -72,6 +90,12 @@ public class TarnConfig {
         options.addOption("tp", "tensor-parallelism", true, "Tensor parallelism");
         options.addOption("pp", "pipeline-parallelism", true, "Pipeline parallelism");
         options.addOption("s", "secrets", true, "HDFS path to JKS/JCEKS secrets file");
+        options.addOption("pt", "placement-tag", true, "Placement tag for anti-affinity (default: nvidia)");
+        options.addOption("dn", "docker-network", true, "Docker network (default: host)");
+        options.addOption("dp", "docker-privileged", false, "Run docker in privileged mode");
+        options.addOption("ddr", "docker-delayed-removal", false, "Delayed removal of docker containers");
+        options.addOption("dm", "docker-mounts", true, "Docker mounts (comma-separated)");
+        options.addOption("dports", "docker-ports", true, "Docker port mapping (host_port:container_port,...)");
         return options;
     }
 }

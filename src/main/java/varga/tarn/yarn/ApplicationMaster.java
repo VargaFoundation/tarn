@@ -43,6 +43,7 @@ public class ApplicationMaster {
     private AMRMClientAsync<AMRMClient.ContainerRequest> amRMClient;
     private NMClientAsync nmClient;
     private DiscoveryServer discoveryServer;
+    private PlacementConstraint tritonConstraint;
 
     public ApplicationMaster() {
         this.conf = new YarnConfiguration();
@@ -74,17 +75,18 @@ public class ApplicationMaster {
         // Register with ResourceManager
         String appMasterHostname = InetAddress.getLocalHost().getHostName();
 
-        // Anti-affinity constraint: no more than 1 container with tag "triton" per node
-        PlacementConstraint tritonConstraint = PlacementConstraints.targetNotIn(
+        // Anti-affinity constraint: no more than 1 container with the configured placement tag per node
+        tritonConstraint = PlacementConstraints.targetNotIn(
                 PlacementConstraints.NODE,
-                PlacementConstraints.PlacementTargets.allocationTag("triton")
+                PlacementConstraints.PlacementTargets.allocationTag(config.placementTag)
         ).build();
         Map<Set<String>, PlacementConstraint> constraints = Collections.singletonMap(
-                Collections.singleton("triton"), tritonConstraint);
+                Collections.singleton(config.placementTag), tritonConstraint);
 
         amRMClient.registerApplicationMaster(appMasterHostname, config.amPort,
                 "http://" + appMasterHostname + ":" + config.amPort, constraints);
-        log.info("ApplicationMaster registered with RM at {}:{} with anti-affinity constraints", appMasterHostname, config.amPort);
+        log.info("ApplicationMaster registered with RM at {}:{} with anti-affinity constraints on tag '{}'", 
+                appMasterHostname, config.amPort, config.placementTag);
 
         // Initial request for Triton containers
         requestContainers();
@@ -138,7 +140,8 @@ public class ApplicationMaster {
                         .priority(priority)
                         .allocationRequestId(allocationRequestIdCounter.incrementAndGet())
                         .resourceSizing(ResourceSizing.newInstance(1, capability))
-                        .allocationTags(Collections.singleton("triton"))
+                        .allocationTags(Collections.singleton(config.placementTag))
+                        .placementConstraintExpression(tritonConstraint)
                         .build();
                 amRMClient.addSchedulingRequests(Collections.singletonList(schedulingRequest));
             }
@@ -210,6 +213,23 @@ public class ApplicationMaster {
             env.put("YARN_CONTAINER_RUNTIME_TYPE", "docker");
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_IMAGE", config.tritonImage);
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE", "true");
+            if (config.dockerNetwork != null && !config.dockerNetwork.isEmpty()) {
+                env.put("YARN_CONTAINER_RUNTIME_DOCKER_CONTAINER_NETWORK", config.dockerNetwork);
+            }
+            if (config.dockerPrivileged) {
+                env.put("YARN_CONTAINER_RUNTIME_DOCKER_RUN_PRIVILEGED_CONTAINER", "true");
+            }
+            if (config.dockerDelayedRemoval) {
+                env.put("YARN_CONTAINER_RUNTIME_DOCKER_DELAYED_REMOVAL", "true");
+            }
+            if (config.dockerMounts != null && !config.dockerMounts.isEmpty()) {
+                env.put("YARN_CONTAINER_RUNTIME_DOCKER_MOUNTS", config.dockerMounts);
+            }
+            if (config.dockerPorts != null && !config.dockerPorts.isEmpty()) {
+                env.put("YARN_CONTAINER_RUNTIME_DOCKER_PORTS_MAPPING", config.dockerPorts);
+            }
+            env.put("YARN_CONTAINER_RUNTIME_DOCKER_CONTAINER_HOSTNAME", container.getId().toString());
+            env.put("YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS", "true");
             
             // Add secrets to environment if available
             if (config.secretsPath != null) {

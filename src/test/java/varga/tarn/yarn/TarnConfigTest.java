@@ -11,6 +11,11 @@ public class TarnConfigTest {
         assertEquals("nvcr.io/nvidia/tritonserver:24.09-py3", config.tritonImage);
         assertEquals(8000, config.tritonPort);
         assertEquals(8888, config.amPort);
+        assertEquals("host", config.dockerNetwork);
+        assertFalse(config.dockerPrivileged);
+        assertFalse(config.dockerDelayedRemoval);
+        assertNull(config.dockerMounts);
+        assertNull(config.dockerPorts);
     }
 
     @Test
@@ -20,7 +25,12 @@ public class TarnConfigTest {
             "--port", "9000",
             "--image", "my-triton",
             "--am-port", "7777",
-            "--token", "secret"
+            "--token", "secret",
+            "--docker-network", "bridge",
+            "--docker-privileged",
+            "--docker-delayed-removal",
+            "--docker-mounts", "/tmp:/tmp",
+            "--docker-ports", "8000:8000,8001:8001"
         };
         config.parseArgs(args);
         
@@ -28,5 +38,10 @@ public class TarnConfigTest {
         assertEquals("my-triton", config.tritonImage);
         assertEquals(7777, config.amPort);
         assertEquals("secret", config.apiToken);
+        assertEquals("bridge", config.dockerNetwork);
+        assertTrue(config.dockerPrivileged);
+        assertTrue(config.dockerDelayedRemoval);
+        assertEquals("/tmp:/tmp", config.dockerMounts);
+        assertEquals("8000:8000,8001:8001", config.dockerPorts);
     }
 }

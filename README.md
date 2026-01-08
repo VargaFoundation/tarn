@@ -52,7 +52,8 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --token [security_token] \
   --tp [tensor_parallelism] \
   --pp [pipeline_parallelism] \
-  --secrets [hdfs_jks_path]
+  --secrets [hdfs_jks_path] \
+  --placement-tag [tag]
 ```
 
 Example:
@@ -67,8 +68,32 @@ yarn jar target/tarn-orchestrator-0.0.1-SNAPSHOT.jar varga.tarn.yarn.Client \
   --token my-secret-token \
   --tp 2 \
   --pp 1 \
-  --secrets hdfs:///user/secrets/hf.jceks
+  --secrets hdfs:///user/secrets/hf.jceks \
+  --placement-tag nvidia
 ```
+
+## Node Tagging and Placement
+
+TARN uses YARN **Placement Constraints** to ensure optimal distribution of Triton instances. By default, it uses the tag `nvidia` for anti-affinity (at most one container per node).
+
+### How to tag nodes in YARN
+
+To use placement constraints effectively, you may want to tag your nodes. In YARN, this is typically done using **Node Labels** or by configuring the NodeManagers.
+
+#### 1. Using Node Labels (Recommended for GPU isolation)
+Node labels allow you to partition the cluster. For example, to label nodes with GPUs:
+```bash
+# Add the label
+yarn rmadmin -replaceLabelsOnNode "node1:8041,GPU node2:8041,GPU"
+```
+Then, you can configure your queue to use these labels. Note that TARN also explicitly requests `yarn.io/gpu` resources.
+
+#### 2. Anti-Affinity via Placement Constraints
+TARN automatically handles anti-affinity. If you use the `--placement-tag` option, TARN will:
+1. Tag all its Triton containers with this value.
+2. Tell YARN to never place two containers with the same tag on the same host.
+
+This ensures that even if you have multiple GPUs on a single node, a single Triton instance (which can manage multiple GPUs via TP/PP) will occupy that node, preventing resource contention between multiple Triton processes.
 
 ## Load Balancing and Service Discovery
 
