@@ -48,6 +48,13 @@
                     <#if zkEnabled>
                         <p class="text-xs text-gray-500 mt-1 truncate">Path: ${zkPath}</p>
                     </#if>
+                    <p class="flex justify-between mt-2"><span>Ranger:</span> 
+                        <#if rangerEnabled>
+                            <span class="text-blue-500 font-semibold">Enabled</span>
+                        <#else>
+                            <span class="text-gray-500">Disabled</span>
+                        </#if>
+                    </p>
                 </div>
             </div>
             

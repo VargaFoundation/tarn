@@ -4,6 +4,7 @@ import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 import java.net.URI;
@@ -39,13 +40,18 @@ public class DiscoveryServerTest {
 
         ApplicationMaster mockAm = mock(ApplicationMaster.class);
         MetricsCollector mockMetrics = mock(MetricsCollector.class);
+        RangerAuthorizer mockAuthorizer = mock(RangerAuthorizer.class);
+        
         when(mockMetrics.fetchLoadedModels(anyString(), anyInt())).thenReturn("[]");
         when(mockMetrics.fetchContainerLoad(anyString())).thenReturn(0.5);
         when(mockMetrics.fetchGpuMetricsStructured(anyString())).thenReturn(new java.util.HashMap<>());
         
+        when(mockAuthorizer.isAllowed(anyString(), anySet(), anyString(), anyString())).thenReturn(true);
+        
         when(mockAm.getRunningContainers()).thenReturn(containers);
         when(mockAm.getAvailableModels()).thenReturn(new ArrayList<>());
         when(mockAm.getMetricsCollector()).thenReturn(mockMetrics);
+        when(mockAm.getRangerAuthorizer()).thenReturn(mockAuthorizer);
         when(mockAm.getAvailableResources()).thenReturn(org.apache.hadoop.yarn.api.records.Resource.newInstance(1024, 1));
 
         DiscoveryServer server = new DiscoveryServer(config, mockAm);

@@ -98,9 +98,12 @@ The architecture is based on a native YARN application consisting of:
 - **Distributed Inference**: Support for multi-GPU inference using Tensor Parallelism (TP) and Pipeline Parallelism (PP).
 - **Anti-Affinity**: Ensures that YARN places at most one Triton container per node for optimal performance and isolation.
 - **ZooKeeper Integration**: Application Master registers Triton instances in ZooKeeper for dynamic discovery by Apache Knox.
+- **Apache Ranger Integration**: Centralized authorization for model access.
 - **High Availability**: Support for Application Master restart, recovering active containers from previous attempts.
 - **Health Monitoring**: Integrated health checks using Triton's `/v2/health/ready` endpoint.
-- **Secret Management**: Support for JKS/JCEKS secret files on HDFS for sensitive data like Hugging Face tokens.
+- **Secret Management**: Support for JKS/JCEKS secret files on HDFS for sensitive data. 
+    - The `huggingface.token` alias is automatically mapped to `HUGGING_FACE_HUB_TOKEN`.
+    - Any alias starting with `tarn.env.` is automatically mapped to an environment variable (e.g., `tarn.env.AWS_SECRET_KEY` becomes `AWS_SECRET_KEY`).
 - **Model Storage**: Support for HDFS (with automatic copy) or NFS (direct access via NFS Gateway).
 - Support for Open Inference Protocol (OIP).
 
@@ -444,7 +447,118 @@ TARN implements several security features:
 - **API Token**: The Application Master can be configured with a token to secure the service discovery endpoint.
 - **Dynamic Discovery**: Eliminates the need to hardcode IP addresses, reducing exposure.
 - **YARN Isolation**: Leverages YARN's multi-tenancy and Docker isolation.
+- **Apache Ranger**: Provides centralized model-level authorization, ensuring that users can only discover and use models they are explicitly permitted to access.
 - **Kerberos Support**: Compatible with secured Hadoop clusters (ensure the discovery script has a valid ticket).
+
+### Apache Ranger Integration
+
+TARN integrates with **Apache Ranger** to provide fine-grained access control at the model level. This ensures that users only see and interact with the models they are authorized to use.
+
+#### 1. Create Ranger Service Definition
+
+Before you can define policies, you must register the `triton` service definition in Ranger Admin.
+
+1.  Use the following JSON to create a file named `triton-service-def.json`:
+    ```json
+    {
+      "name": "triton",
+      "id": 1001,
+      "resources": [
+        {
+          "name": "model",
+          "level": 1,
+          "parent": "",
+          "mandatory": true,
+          "lookupSupported": true,
+          "recursiveSupported": false,
+          "matcher": "org.apache.ranger.plugin.resourcematcher.RangerDefaultResourceMatcher",
+          "matcherOptions": { "wildCard": true, "ignoreCase": true },
+          "label": "Triton Model",
+          "description": "Triton Model Name"
+        }
+      ],
+      "accessTypes": [
+        { "name": "infer", "label": "Inference" },
+        { "name": "metadata", "label": "Metadata" },
+        { "name": "list", "label": "List" }
+      ],
+      "contextEnrichers": [],
+      "policyConditions": []
+    }
+    ```
+2.  Register the service type using the Ranger REST API:
+    ```bash
+    curl -u admin:password -X POST -H "Content-Type: application/json" \
+      http://<RANGER_ADMIN_HOST>:6080/service/plugins/definitions \
+      -d @triton-service-def.json
+    ```
+3.  In the Ranger Admin UI, create a new service instance (e.g., named `triton_prod`) using the newly created `triton` service type.
+
+#### 2. Enable Ranger in TARN
+
+To enable Ranger, you must provide the Ranger service name when submitting the application:
+
+```bash
+yarn jar tarn-orchestrator.jar varga.tarn.yarn.Client \
+  ... \
+  --ranger-service triton_prod \
+  --ranger-app-id tarn \
+  --ranger-audit
+```
+
+**Options:**
+- `--ranger-service` (`-rs`): The name of the service instance defined in Ranger Admin.
+- `--ranger-app-id` (`-ra`): The application ID for Ranger (default: `tarn`).
+- `--ranger-audit` (`-raudit`): Enable auditing of access requests in Ranger.
+
+**Environment Variables:**
+- `RANGER_SERVICE`
+- `RANGER_APP_ID`
+- `RANGER_AUDIT`
+
+#### 3. Ranger Service Definition Details
+
+The service definition (registered in step 1) includes the following resources and access types:
+
+- **Resource**: `model` (The name of the inference model).
+- **Access Types**:
+  - `infer`: Permission to run inference requests.
+  - `metadata`: Permission to view model configuration/metadata.
+  - `list`: Permission to see the model in the discovery list and dashboard.
+
+A complete JSON service definition is available in `SPEC Ranger.md`.
+
+#### 4. How it Works
+
+1.  **Identity Propagation**: When accessing the AM Dashboard or API, TARN identifies the user via Kerberos or the `X-TARN-User` header.
+2.  **Authorization and Auditing**: For every model available in the HDFS repository, TARN queries the Ranger plugin to check if the user has `list` permission. If `--ranger-audit` is enabled, these access attempts are logged to the configured Ranger audit destination.
+3.  **Dynamic Filtering**: Models for which the user does not have permission are automatically filtered out from the Dashboard and service discovery results.
+
+#### 5. Audit Configuration
+
+To enable auditing, the following conditions must be met:
+1. The `--ranger-audit` flag must be set.
+2. A `ranger-triton-audit.xml` configuration file must be present in the Application Master's classpath. This file defines where the audits are sent (e.g., Solr, HDFS, or Log4j).
+
+Example `ranger-triton-audit.xml`:
+```xml
+<configuration>
+    <property>
+        <name>xasecure.audit.is.enabled</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>xasecure.audit.destination.log4j</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>xasecure.audit.destination.log4j.logger</name>
+        <value>ranger.audit</value>
+    </property>
+</configuration>
+```
+
+You can include the directory containing this file in the `CLASSPATH` or use the `--env` option to pass configuration properties if supported by the Ranger version.
 
 ## Usage Examples (Open Inference Protocol)
 

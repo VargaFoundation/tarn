@@ -48,6 +48,7 @@ public class ApplicationMaster {
     private AMRMClientAsync<AMRMClient.ContainerRequest> amRMClient;
     private NMClientAsync nmClient;
     private DiscoveryServer discoveryServer;
+    private RangerAuthorizer rangerAuthorizer;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
 
@@ -74,6 +75,8 @@ public class ApplicationMaster {
         
         discoveryServer = new DiscoveryServer(config, this);
         discoveryServer.start();
+
+        rangerAuthorizer = new RangerAuthorizer(config);
 
         // Initialize ZooKeeper client if ensemble is configured
         if (config.zkEnsemble != null && !config.zkEnsemble.isEmpty()) {
@@ -157,6 +160,9 @@ public class ApplicationMaster {
         }
         if (discoveryServer != null) {
             discoveryServer.stop();
+        }
+        if (rangerAuthorizer != null) {
+            rangerAuthorizer.stop();
         }
         if (zkClient != null) {
             zkClient.close();
@@ -318,7 +324,7 @@ public class ApplicationMaster {
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_CONTAINER_HOSTNAME", container.getId().toString());
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS", "true");
             
-            // Add secrets to environment if available
+            // Add secrets from JCEKS to environment
             if (config.secretsPath != null) {
                 try {
                     Configuration secretConf = new Configuration(conf);
@@ -330,10 +336,40 @@ public class ApplicationMaster {
                     }
                     secretConf.set("hadoop.security.credential.provider.path", providerPath);
                     
+                    // Standard Hugging Face token
                     char[] hfToken = secretConf.getPassword("huggingface.token");
                     if (hfToken != null) {
                         env.put("HUGGING_FACE_HUB_TOKEN", new String(hfToken));
                         log.info("Loaded Hugging Face token from secrets");
+                    }
+
+                    // Dynamic secrets mapping: any alias starting with "tarn.env." will be mapped to env var
+                    // e.g. tarn.env.AWS_ACCESS_KEY_ID -> AWS_ACCESS_KEY_ID
+                    try {
+                        // Use reflection or direct call if Hadoop version allows
+                        java.util.List<String> aliases = org.apache.hadoop.security.alias.CredentialProviderFactory.getProviders(secretConf)
+                                .stream()
+                                .flatMap(p -> {
+                                    try {
+                                        return p.getAliases().stream();
+                                    } catch (IOException e) {
+                                        return java.util.stream.Stream.empty();
+                                    }
+                                })
+                                .toList();
+                                
+                        for (String alias : aliases) {
+                            if (alias.startsWith("tarn.env.")) {
+                                String envVar = alias.substring("tarn.env.".length());
+                                char[] value = secretConf.getPassword(alias);
+                                if (value != null) {
+                                    env.put(envVar, new String(value));
+                                    log.info("Loaded secret {} as env var {}", alias, envVar);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("Failed to list additional aliases from secrets: {}", e.getMessage());
                     }
                 } catch (Exception e) {
                     log.warn("Failed to load secrets from {}: {}", config.secretsPath, e.getMessage());
@@ -437,6 +473,10 @@ public class ApplicationMaster {
 
     public MetricsCollector getMetricsCollector() {
         return metricsCollector;
+    }
+
+    public RangerAuthorizer getRangerAuthorizer() {
+        return rangerAuthorizer;
     }
 
     public int getTargetNumContainers() {

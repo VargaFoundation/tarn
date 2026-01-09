@@ -27,6 +27,9 @@ public class TarnConfig {
     public String jarPath;
     public String zkEnsemble;
     public String zkPath;
+    public String rangerService;
+    public String rangerAppId;
+    public boolean rangerAudit;
     public Map<String, String> customEnv = new HashMap<>();
     
     // Scaling properties
@@ -59,6 +62,9 @@ public class TarnConfig {
         dockerPorts = getEnv("DOCKER_PORTS", null);
         zkEnsemble = getEnv("ZK_ENSEMBLE", null);
         zkPath = getEnv("ZK_PATH", "/services/triton/instances");
+        rangerService = getEnv("RANGER_SERVICE", null);
+        rangerAppId = getEnv("RANGER_APP_ID", "tarn");
+        rangerAudit = Boolean.parseBoolean(getEnv("RANGER_AUDIT", "true"));
         
         scaleUpThreshold = Double.parseDouble(getEnv("SCALE_UP_THRESHOLD", "0.7"));
         scaleDownThreshold = Double.parseDouble(getEnv("SCALE_DOWN_THRESHOLD", "0.2"));
@@ -96,6 +102,9 @@ public class TarnConfig {
         if (line.hasOption("docker-ports")) dockerPorts = line.getOptionValue("docker-ports");
         if (line.hasOption("zk-ensemble")) zkEnsemble = line.getOptionValue("zk-ensemble");
         if (line.hasOption("zk-path")) zkPath = line.getOptionValue("zk-path");
+        if (line.hasOption("ranger-service")) rangerService = line.getOptionValue("ranger-service");
+        if (line.hasOption("ranger-app-id")) rangerAppId = line.getOptionValue("ranger-app-id");
+        if (line.hasOption("ranger-audit")) rangerAudit = true;
         if (line.hasOption("jar")) jarPath = line.getOptionValue("jar");
         if (line.hasOption("env")) {
             String[] envs = line.getOptionValues("env");
@@ -135,6 +144,9 @@ public class TarnConfig {
         options.addOption("dports", "docker-ports", true, "Docker port mapping (host_port:container_port,...)");
         options.addOption("ze", "zk-ensemble", true, "ZooKeeper ensemble (e.g. host1:2181,host2:2181)");
         options.addOption("zp", "zk-path", true, "ZooKeeper path for instance registration (default: /services/triton/instances)");
+        options.addOption("rs", "ranger-service", true, "Apache Ranger service name");
+        options.addOption("ra", "ranger-app-id", true, "Apache Ranger App ID (default: tarn)");
+        options.addOption("raudit", "ranger-audit", false, "Enable Apache Ranger auditing");
         options.addOption("j", "jar", true, "Path to the application JAR (local, will be uploaded to HDFS)");
         
         Option envOption = new Option("e", "env", true, "Custom environment variables (KEY=VALUE)");

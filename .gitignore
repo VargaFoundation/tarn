@@ -27,3 +27,4 @@ replay_pid*
 /target/
 /dependency-reduced-pom.xml
 /SPEC Knox.md
+/SPEC Ranger.md

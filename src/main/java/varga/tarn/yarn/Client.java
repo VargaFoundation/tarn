@@ -104,6 +104,18 @@ public class Client {
         if (config.dockerPorts != null) {
             env.put("DOCKER_PORTS", config.dockerPorts);
         }
+        env.put("SCALE_UP_THRESHOLD", String.valueOf(config.scaleUpThreshold));
+        env.put("SCALE_DOWN_THRESHOLD", String.valueOf(config.scaleDownThreshold));
+        env.put("MIN_CONTAINERS", String.valueOf(config.minContainers));
+        env.put("MAX_CONTAINERS", String.valueOf(config.maxContainers));
+        env.put("SCALE_COOLDOWN_MS", String.valueOf(config.scaleCooldownMs));
+        if (config.rangerService != null) {
+            env.put("RANGER_SERVICE", config.rangerService);
+        }
+        if (config.rangerAppId != null) {
+            env.put("RANGER_APP_ID", config.rangerAppId);
+        }
+        env.put("RANGER_AUDIT", String.valueOf(config.rangerAudit));
         
         // Add classpath to environment
         StringBuilder classPathEnv = new StringBuilder(ApplicationConstants.Environment.CLASSPATH.$())
@@ -147,6 +159,16 @@ public class Client {
         if (config.dockerDelayedRemoval) amCommand.append(" --docker-delayed-removal");
         if (config.dockerMounts != null) amCommand.append(" --docker-mounts ").append(config.dockerMounts);
         if (config.dockerPorts != null) amCommand.append(" --docker-ports ").append(config.dockerPorts);
+
+        amCommand.append(" --scale-up ").append(config.scaleUpThreshold)
+                .append(" --scale-down ").append(config.scaleDownThreshold)
+                .append(" --min-instances ").append(config.minContainers)
+                .append(" --max-instances ").append(config.maxContainers)
+                .append(" --cooldown ").append(config.scaleCooldownMs);
+
+        if (config.rangerService != null) amCommand.append(" --ranger-service ").append(config.rangerService);
+        if (config.rangerAppId != null) amCommand.append(" --ranger-app-id ").append(config.rangerAppId);
+        if (config.rangerAudit) amCommand.append(" --ranger-audit");
 
         for (Map.Entry<String, String> entry : config.customEnv.entrySet()) {
             amCommand.append(" --env ").append(entry.getKey()).append("=").append(entry.getValue());

@@ -42,7 +42,10 @@ public class TarnConfigTest {
             "--cooldown", "30000",
             "--jar", "target/tarn.jar",
             "--env", "VAR1=VAL1",
-            "--env", "VAR2=VAL2"
+            "--env", "VAR2=VAL2",
+            "--ranger-service", "triton-ranger",
+            "--ranger-app-id", "tarn-app",
+            "--ranger-audit"
         };
         config.parseArgs(args);
         
@@ -57,6 +60,9 @@ public class TarnConfigTest {
         assertEquals("8000:8000,8001:8001", config.dockerPorts);
         assertEquals("localhost:2181", config.zkEnsemble);
         assertEquals("/test/path", config.zkPath);
+        assertEquals("triton-ranger", config.rangerService);
+        assertEquals("tarn-app", config.rangerAppId);
+        assertTrue(config.rangerAudit);
         assertEquals("target/tarn.jar", config.jarPath);
         assertEquals("VAL1", config.customEnv.get("VAR1"));
         assertEquals("VAL2", config.customEnv.get("VAR2"));

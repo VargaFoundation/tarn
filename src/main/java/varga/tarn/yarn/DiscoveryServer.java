@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import freemarker.template.Configuration;
@@ -81,6 +82,29 @@ public class DiscoveryServer {
         return true;
     }
 
+    private String getRequestUser(HttpExchange exchange) {
+        String user = exchange.getRequestHeaders().getFirst("X-TARN-User");
+        if (user == null || user.isEmpty()) {
+            try {
+                user = UserGroupInformation.getCurrentUser().getShortUserName();
+            } catch (IOException e) {
+                user = "anonymous";
+            }
+        }
+        return user;
+    }
+
+    private java.util.Set<String> getUserGroups(String user) {
+        java.util.Set<String> groups = new java.util.HashSet<>();
+        try {
+            UserGroupInformation ugi = UserGroupInformation.createRemoteUser(user);
+            groups.addAll(java.util.Arrays.asList(ugi.getGroupNames()));
+        } catch (Exception e) {
+            // Fallback
+        }
+        return groups;
+    }
+
     private class InstancesHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -138,7 +162,18 @@ public class DiscoveryServer {
             model.put("containers", containerModels);
 
             // HDFS Models
-            model.put("availableModels", am.getAvailableModels());
+            List<String> allModels = am.getAvailableModels();
+            List<String> authorizedModels = new ArrayList<>();
+            String user = getRequestUser(exchange);
+            java.util.Set<String> groups = getUserGroups(user);
+            
+            for (String m : allModels) {
+                if (am.getRangerAuthorizer().isAllowed(user, groups, "list", m)) {
+                    authorizedModels.add(m);
+                }
+            }
+            model.put("availableModels", authorizedModels);
+            model.put("rangerEnabled", config.rangerService != null && !config.rangerService.isEmpty());
 
             // Samples for models (still useful but user wanted to remove GPU sample)
             if (!containers.isEmpty()) {
