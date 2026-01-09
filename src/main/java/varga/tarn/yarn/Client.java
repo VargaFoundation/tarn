@@ -90,6 +90,12 @@ public class Client {
         env.put("PIPELINE_PARALLELISM", String.valueOf(config.pipelineParallelism));
         env.put("PLACEMENT_TAG", config.placementTag);
         env.put("DOCKER_NETWORK", config.dockerNetwork);
+        if (config.zkEnsemble != null) {
+            env.put("ZK_ENSEMBLE", config.zkEnsemble);
+        }
+        if (config.zkPath != null) {
+            env.put("ZK_PATH", config.zkPath);
+        }
         env.put("DOCKER_PRIVILEGED", String.valueOf(config.dockerPrivileged));
         env.put("DOCKER_DELAYED_REMOVAL", String.valueOf(config.dockerDelayedRemoval));
         if (config.dockerMounts != null) {
@@ -129,6 +135,13 @@ public class Client {
                 .append(" --pp ").append(config.pipelineParallelism)
                 .append(" --placement-tag ").append(config.placementTag)
                 .append(" --docker-network ").append(config.dockerNetwork);
+
+        if (config.zkEnsemble != null) {
+            amCommand.append(" --zk-ensemble ").append(config.zkEnsemble);
+        }
+        if (config.zkPath != null) {
+            amCommand.append(" --zk-path ").append(config.zkPath);
+        }
 
         if (config.dockerPrivileged) amCommand.append(" --docker-privileged");
         if (config.dockerDelayedRemoval) amCommand.append(" --docker-delayed-removal");

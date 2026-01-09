@@ -116,6 +116,8 @@ public class DiscoveryServer {
             resMap.put("virtualCores", res.getVirtualCores());
             model.put("availableResources", resMap);
             model.put("targetNumContainers", am.getTargetNumContainers());
+            model.put("zkEnabled", config.zkEnsemble != null && !config.zkEnsemble.isEmpty());
+            model.put("zkPath", config.zkPath);
 
             // Containers
             List<Map<String, Object>> containerModels = new ArrayList<>();

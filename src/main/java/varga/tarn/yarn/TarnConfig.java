@@ -25,6 +25,8 @@ public class TarnConfig {
     public String dockerMounts;
     public String dockerPorts;
     public String jarPath;
+    public String zkEnsemble;
+    public String zkPath;
     public Map<String, String> customEnv = new HashMap<>();
     
     // Scaling properties
@@ -55,6 +57,8 @@ public class TarnConfig {
         dockerDelayedRemoval = Boolean.parseBoolean(getEnv("DOCKER_DELAYED_REMOVAL", "false"));
         dockerMounts = getEnv("DOCKER_MOUNTS", null);
         dockerPorts = getEnv("DOCKER_PORTS", null);
+        zkEnsemble = getEnv("ZK_ENSEMBLE", null);
+        zkPath = getEnv("ZK_PATH", "/services/triton/instances");
         
         scaleUpThreshold = Double.parseDouble(getEnv("SCALE_UP_THRESHOLD", "0.7"));
         scaleDownThreshold = Double.parseDouble(getEnv("SCALE_DOWN_THRESHOLD", "0.2"));
@@ -90,6 +94,8 @@ public class TarnConfig {
         if (line.hasOption("docker-delayed-removal")) dockerDelayedRemoval = true;
         if (line.hasOption("docker-mounts")) dockerMounts = line.getOptionValue("docker-mounts");
         if (line.hasOption("docker-ports")) dockerPorts = line.getOptionValue("docker-ports");
+        if (line.hasOption("zk-ensemble")) zkEnsemble = line.getOptionValue("zk-ensemble");
+        if (line.hasOption("zk-path")) zkPath = line.getOptionValue("zk-path");
         if (line.hasOption("jar")) jarPath = line.getOptionValue("jar");
         if (line.hasOption("env")) {
             String[] envs = line.getOptionValues("env");
@@ -127,6 +133,8 @@ public class TarnConfig {
         options.addOption("ddr", "docker-delayed-removal", false, "Delayed removal of docker containers");
         options.addOption("dm", "docker-mounts", true, "Docker mounts (comma-separated)");
         options.addOption("dports", "docker-ports", true, "Docker port mapping (host_port:container_port,...)");
+        options.addOption("ze", "zk-ensemble", true, "ZooKeeper ensemble (e.g. host1:2181,host2:2181)");
+        options.addOption("zp", "zk-path", true, "ZooKeeper path for instance registration (default: /services/triton/instances)");
         options.addOption("j", "jar", true, "Path to the application JAR (local, will be uploaded to HDFS)");
         
         Option envOption = new Option("e", "env", true, "Custom environment variables (KEY=VALUE)");

@@ -9,11 +9,15 @@ graph TB
     %% Client
     Client[Client]
 
-    %% Load Balancer
-    subgraph LoadBalancer ["Load Balancer"]
+    %% Perimeter Security & LB
+    subgraph Perimeter ["Secure Gateway"]
         HA[HAProxy Instance]
+        Knox[Apache Knox Gateway]
         Updater[HAProxy Updater Script]
     end
+
+    %% ZooKeeper
+    ZK((ZooKeeper))
 
     %% YARN Cluster
     subgraph YARN ["YARN Cluster"]
@@ -44,14 +48,21 @@ graph TB
     end
 
     %% Connexions principales (flux vertical)
-    Client -->|7. Inference Request| HA
+    Client -->|Inference Request| HA
+    Client -->|Secure Inference Request| Knox
     HA -->|Load Balances| TC1
     HA -->|Load Balances| TC2
+    Knox -->|Dynamic LB via ZK| TC1
+    Knox -->|Dynamic LB via ZK| TC2
 
     %% Interactions YARN
     AM -.->|1. Request Resources| RM
     RM -.->|2. Allocate Containers| NM2
     RM -.->|2. Allocate Containers| NM3
+
+    %% ZooKeeper Registration
+    AM -.->|Register Instances| ZK
+    Knox -.->|Discover Instances| ZK
 
     %% Découverte et mise à jour HAProxy
     Updater -.->|4. Discover AM| RM
@@ -66,7 +77,7 @@ graph TB
 
     %% Style pour forcer l'empilement vertical
     classDef cluster fill:#2d2d2d,stroke:#444,color:#fff;
-    class LoadBalancer,YARN,HDFS cluster;
+    class Perimeter,YARN,HDFS cluster;
 ```
 
 The architecture is based on a native YARN application consisting of:
@@ -86,6 +97,7 @@ The architecture is based on a native YARN application consisting of:
 - **Prometheus Metrics**: Aggregated metrics endpoint for Grafana (available at `http://AM_HOST:AM_PORT/metrics`).
 - **Distributed Inference**: Support for multi-GPU inference using Tensor Parallelism (TP) and Pipeline Parallelism (PP).
 - **Anti-Affinity**: Ensures that YARN places at most one Triton container per node for optimal performance and isolation.
+- **ZooKeeper Integration**: Application Master registers Triton instances in ZooKeeper for dynamic discovery by Apache Knox.
 - **High Availability**: Support for Application Master restart, recovering active containers from previous attempts.
 - **Health Monitoring**: Integrated health checks using Triton's `/v2/health/ready` endpoint.
 - **Secret Management**: Support for JKS/JCEKS secret files on HDFS for sensitive data like Hugging Face tokens.
@@ -144,10 +156,31 @@ Now you can point TARN to your models using the local mount path:
 
 ## Prerequisites
 
-- Hadoop 3.3+ configured with Docker Runtime.
-- NVIDIA Drivers and NVIDIA Container Toolkit installed on NodeManagers.
-- Java 17 and Maven for building.
-- **socat** installed on the HAProxy node for dynamic updates.
+### 1. Hadoop Cluster Requirements
+- **Hadoop 3.3+**: Required for native Docker support and Placement Constraints.
+- **YARN Docker Runtime**: Must be enabled and configured on all NodeManagers.
+  - In `yarn-site.xml`, ensure `yarn.nodemanager.container-executor.class` is set to `org.apache.hadoop.yarn.server.nodemanager.LinuxContainerExecutor`.
+  - Docker must be an allowed runtime: `yarn.nodemanager.runtime.linux.allowed-runtimes` should include `docker`.
+  - The Triton image must be whitelisted in `yarn-site.xml` (`yarn.nodemanager.runtime.linux.docker.allowed-container-networks` and associated registries).
+- **Linux Container Executor**: Requires a properly configured `container-executor.cfg` on all nodes, with a `[docker]` section defined.
+
+### 2. GPU and NVIDIA Environment
+- **NVIDIA Drivers**: Installed on all NodeManagers hosting GPUs.
+- **NVIDIA Container Toolkit**: Installed and configured as the default runtime for Docker on NodeManagers.
+- **YARN GPU Scheduling**:
+  - `yarn.io/gpu` must be defined as a resource type in `resource-types.xml`.
+  - The `DominantResourceCalculator` must be used in the scheduler configuration (e.g., `capacity-scheduler.xml`).
+  - NodeManagers must be configured to discover and report GPUs (using `yarn.nodemanager.resource-plugins` and `yarn.nodemanager.resource-plugins.gpu.path-to-discovery-executables`).
+
+### 3. Development and Runtime Tools
+- **Java 17**: Required for building and running the Application Master.
+- **Maven**: For building the project.
+- **socat**: Required on the node running the HAProxy update script (if using Option 2).
+- **ZooKeeper**: Required for service registration and Knox discovery (if using Option 1 - Recommended).
+
+### 4. Network and Permissions
+- **Connectivity**: The Application Master must be able to reach NodeManagers on the Triton HTTP/GRPC ports and metrics ports.
+- **Permissions**: The user submitting the YARN application must have permissions to launch Docker containers via the Linux Container Executor.
 
 ## Build
 
@@ -262,34 +295,102 @@ TARN automatically handles anti-affinity. If you use the `--placement-tag` optio
 
 This ensures that even if you have multiple GPUs on a single node, a single Triton instance (which can manage multiple GPUs via TP/PP) will occupy that node, preventing resource contention between multiple Triton processes.
 
-## Load Balancing and Service Discovery
+## Load Balancing Options
 
-The script `scripts/update_haproxy.sh` dynamically discovers the Application Master using the YARN CLI and updates HAProxy configuration via its Runtime API.
+TARN provides two distinct strategies for service discovery and load balancing, allowing you to choose the best fit for your infrastructure. **The ZooKeeper-based approach with Apache Knox is highly recommended for production environments.**
 
-### HAProxy Installation and Configuration
+### Comparison and Recommendation
 
-To use the dynamic load balancing feature, you need to install and configure HAProxy on a node that has access to the YARN cluster.
+| Feature | Apache Knox + ZooKeeper (Recommended) | HAProxy + Update Script |
+|:---|:---|:---|
+| **Primary Use Case** | Production, Multi-tenant clusters | Standalone, Simple environments |
+| **Discovery Mechanism** | Native ZK Watches (Push-based) | AM Polling via Script (Pull-based) |
+| **Security** | Kerberos, LDAP, Knox Dispatchers, Audit | Basic Token-based Discovery |
+| **High Availability** | Built-in via Knox HaProvider | Requires External Script Management |
+| **Complexity** | Higher (requires Knox & ZooKeeper) | Lower (requires HAProxy & socat) |
 
-#### 1. Installation
+### Option 1: Apache Knox with ZooKeeper (Recommended)
 
-On Debian/Ubuntu:
+This method leverages **Apache ZooKeeper** for real-time service discovery and **Apache Knox** as a secure perimeter gateway. 
+
+#### How it Works:
+1.  **Ephemeral Registration**: The TARN Application Master (AM) automatically registers every new Triton container as an **ephemeral znode** in ZooKeeper under the configured path (e.g., `/services/triton/instances/container_id`).
+2.  **Liveness Monitoring**: If a container fails or is stopped by YARN, its znode is automatically removed from ZooKeeper by the cluster coordination.
+3.  **Dynamic Discovery**: Apache Knox uses its `HaProvider` to watch the ZooKeeper namespace. As soon as a znode appears or disappears, Knox updates its internal list of backends without any manual intervention.
+4.  **Secure Proxying**: Clients interact with Knox via HTTPS. Knox handles authentication (LDAP, Kerberos) and then forwards requests to the healthy Triton instances.
+
+#### 1. AM Configuration for ZooKeeper
+
+When submitting the application, provide the ZooKeeper ensemble and the base path where instances should register:
+
 ```bash
-sudo apt-get update
-sudo apt-get install haproxy socat
+yarn jar tarn-orchestrator.jar varga.tarn.yarn.Client \
+  ... \
+  --zk-ensemble zk-host1:2181,zk-host2:2181 \
+  --zk-path /services/triton/instances
 ```
 
-On CentOS/RHEL:
+#### 2. Knox Topology Configuration
+
+Create a topology file (e.g., `/etc/knox/conf/topologies/tarn.xml`) and enable the `HaProvider`. This provider is responsible for talking to ZooKeeper and performing round-robin load balancing.
+
+```xml
+<topology>
+    <gateway>
+        <provider>
+            <role>ha</role>
+            <name>HaProvider</name>
+            <enabled>true</enabled>
+            <param>
+                <name>TRITON</name>
+                <value>
+                    enabled=true;
+                    maxFailoverAttempts=3;
+                    failoverSleep=1000;
+                    zookeeperEnsemble=zk-host1:2181,zk-host2:2181;
+                    zookeeperNamespace=/services/triton
+                </value>
+            </param>
+        </provider>
+        <!-- Add your ShiroProvider or Kerberos authentication here -->
+    </gateway>
+    <service>
+        <role>TRITON</role>
+        <!-- No URL is needed here as it is discovered via ZooKeeper -->
+    </service>
+</topology>
+```
+
+---
+
+### Option 2: HAProxy with Dynamic Update Script
+
+This method is suitable for smaller deployments or environments where Apache Knox is not available. It relies on a sidecar script that polls the TARN Application Master.
+
+#### How it Works:
+1.  **AM Discovery**: The `update_haproxy.sh` script uses the YARN CLI to find the current host and port of the Application Master.
+2.  **Instance Polling**: Every 30 seconds (configurable), the script queries the AM's `/instances` endpoint to get the list of active Triton containers.
+3.  **Runtime API Update**: The script communicates with HAProxy via a Unix Socket using `socat`. It uses the **Runtime API** to update server addresses and ports in real-time.
+4.  **Slot Management**: HAProxy must be configured with "placeholder slots". The script maps active containers to these slots. Unused slots are put into `MAINT` (maintenance) mode to stop traffic.
+
+#### 1. HAProxy Installation
+
+Ensure both HAProxy and `socat` are installed on the load balancer node:
+
 ```bash
+# Ubuntu/Debian
+sudo apt-get install haproxy socat
+# RHEL/CentOS
 sudo yum install haproxy socat
 ```
 
-#### 2. Configuration
+#### 2. HAProxy Configuration
 
-Edit `/etc/haproxy/haproxy.cfg` to include the Runtime API and a backend with empty slots.
+Edit `/etc/haproxy/haproxy.cfg`. You **must** enable the stats socket with `level admin` to allow the script to make changes.
 
 ```haproxy
 global
-    # Enable the Runtime API via a Unix socket
+    # Mandatory for the update script
     stats socket /var/run/haproxy.sock mode 660 level admin
     stats timeout 30s
 
@@ -305,41 +406,31 @@ frontend triton_frontend
 
 backend triton_backend
     balance roundrobin
-    # Define placeholder slots that will be updated by the script.
-    # The number of slots should be >= max-instances.
+    # Define placeholder slots. 
+    # Important: The number of slots must be >= your --max-instances setting.
     server triton-1 0.0.0.0:8000 check disabled
     server triton-2 0.0.0.0:8000 check disabled
     server triton-3 0.0.0.0:8000 check disabled
     server triton-4 0.0.0.0:8000 check disabled
-    server triton-5 0.0.0.0:8000 check disabled
-    server triton-6 0.0.0.0:8000 check disabled
-    server triton-7 0.0.0.0:8000 check disabled
-    server triton-8 0.0.0.0:8000 check disabled
 ```
 
-#### 3. Permissions
+#### 3. Permissions and Script Usage
 
-Ensure the user running the `update_haproxy.sh` script has permissions to write to the HAProxy socket:
+The user running the script needs write access to the HAProxy socket:
 
 ```bash
 sudo chown root:haproxy /var/run/haproxy.sock
 sudo chmod 660 /var/run/haproxy.sock
-# Add your user to the haproxy group
 sudo usermod -a -G haproxy $USER
 ```
 
-### Usage
+Run the script in the background or as a systemd service:
 
 ```bash
-./scripts/update_haproxy.sh <HAPROXY_SOCKET_PATH> <SECURITY_TOKEN>
+./scripts/update_haproxy.sh /var/run/haproxy.sock <YOUR_TARN_TOKEN>
 ```
 
-Example:
-```bash
-./scripts/update_haproxy.sh /var/run/haproxy.sock my-secret-token
-```
-
-### Running as a Service
+#### 5. Running as a Service
 
 A systemd unit file is provided in `services/tarn-haproxy-updater.service`. To install it:
 1. Copy the script to `/usr/local/bin/update_haproxy.sh`.

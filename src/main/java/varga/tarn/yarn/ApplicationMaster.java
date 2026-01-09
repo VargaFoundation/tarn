@@ -1,6 +1,10 @@
 package varga.tarn.yarn;
 
 
+import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.retry.ExponentialBackoffRetry;
+import org.apache.zookeeper.CreateMode;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -45,6 +49,7 @@ public class ApplicationMaster {
     private NMClientAsync nmClient;
     private DiscoveryServer discoveryServer;
     private PlacementConstraint tritonConstraint;
+    private CuratorFramework zkClient;
 
     public ApplicationMaster() {
         this.conf = new YarnConfiguration();
@@ -69,6 +74,24 @@ public class ApplicationMaster {
         
         discoveryServer = new DiscoveryServer(config, this);
         discoveryServer.start();
+
+        // Initialize ZooKeeper client if ensemble is configured
+        if (config.zkEnsemble != null && !config.zkEnsemble.isEmpty()) {
+            log.info("Initializing ZooKeeper client with ensemble: {}", config.zkEnsemble);
+            zkClient = CuratorFrameworkFactory.newClient(config.zkEnsemble, new ExponentialBackoffRetry(1000, 3));
+            zkClient.start();
+            try {
+                zkClient.blockUntilConnected();
+                // Ensure base path exists
+                if (zkClient.checkExists().forPath(config.zkPath) == null) {
+                    zkClient.create().creatingParentsIfNeeded().forPath(config.zkPath);
+                }
+                log.info("ZooKeeper client initialized and base path ensured: {}", config.zkPath);
+            } catch (Exception e) {
+                log.error("Failed to initialize ZooKeeper client", e);
+                // We continue even if ZK fails, but log the error
+            }
+        }
 
         // Initialize RM Client
         amRMClient = AMRMClientAsync.createAMRMClientAsync(1000, new RMCallbackHandler());
@@ -100,6 +123,7 @@ public class ApplicationMaster {
             log.info("Recovered {} containers from previous attempt", previousContainers.size());
             for (Container c : previousContainers) {
                 runningContainers.add(c);
+                registerInZooKeeper(c);
             }
         }
 
@@ -133,6 +157,9 @@ public class ApplicationMaster {
         }
         if (discoveryServer != null) {
             discoveryServer.stop();
+        }
+        if (zkClient != null) {
+            zkClient.close();
         }
     }
 
@@ -214,6 +241,41 @@ public class ApplicationMaster {
         return count > 0 ? totalLoad / count : 0.0;
     }
 
+    private void registerInZooKeeper(Container container) {
+        if (zkClient == null) return;
+        
+        String host = container.getNodeId().getHost();
+        String containerId = container.getId().toString();
+        String path = config.zkPath + "/" + containerId;
+        String data = host + ":" + config.tritonPort;
+        
+        try {
+            if (zkClient.checkExists().forPath(path) != null) {
+                zkClient.delete().forPath(path);
+            }
+            zkClient.create()
+                    .withMode(CreateMode.EPHEMERAL)
+                    .forPath(path, data.getBytes());
+            log.info("Registered container {} in ZooKeeper at {}: {}", containerId, path, data);
+        } catch (Exception e) {
+            log.error("Failed to register container {} in ZooKeeper", containerId, e);
+        }
+    }
+
+    private void unregisterFromZooKeeper(ContainerId containerId) {
+        if (zkClient == null) return;
+        
+        String path = config.zkPath + "/" + containerId.toString();
+        try {
+            if (zkClient.checkExists().forPath(path) != null) {
+                zkClient.delete().forPath(path);
+                log.info("Unregistered container {} from ZooKeeper at {}", containerId, path);
+            }
+        } catch (Exception e) {
+            log.error("Failed to unregister container {} from ZooKeeper", containerId, e);
+        }
+    }
+
     private class RMCallbackHandler extends AMRMClientAsync.AbstractCallbackHandler {
         @Override
         public void onContainersAllocated(List<Container> containers) {
@@ -221,6 +283,7 @@ public class ApplicationMaster {
                 log.info("Container allocated: {}. Launching Triton...", container.getId());
                 launchTriton(container);
                 runningContainers.add(container);
+                registerInZooKeeper(container);
             }
         }
 
@@ -304,6 +367,7 @@ public class ApplicationMaster {
                 log.info("Container completed: {}. State: {}. Exit Status: {}. Diagnostics: {}", 
                         status.getContainerId(), status.getState(), status.getExitStatus(), status.getDiagnostics());
                 runningContainers.removeIf(c -> c.getId().equals(status.getContainerId()));
+                unregisterFromZooKeeper(status.getContainerId());
             }
         }
 
@@ -325,8 +389,12 @@ public class ApplicationMaster {
         @Override public void onContainerStopped(ContainerId containerId) {
             log.info("Container stopped: {}", containerId);
             runningContainers.removeIf(c -> c.getId().equals(containerId));
+            unregisterFromZooKeeper(containerId);
         }
-        @Override public void onStartContainerError(ContainerId containerId, Throwable t) { log.error("Start error for {}", containerId, t); }
+        @Override public void onStartContainerError(ContainerId containerId, Throwable t) { 
+            log.error("Start error for {}", containerId, t); 
+            unregisterFromZooKeeper(containerId);
+        }
         @Override public void onContainerResourceIncreased(ContainerId containerId, Resource resource) {}
         @Override public void onContainerResourceUpdated(ContainerId containerId, Resource resource) {}
         @Override public void onIncreaseContainerResourceError(ContainerId containerId, Throwable t) {}

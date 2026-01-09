@@ -16,6 +16,8 @@ public class TarnConfigTest {
         assertFalse(config.dockerDelayedRemoval);
         assertNull(config.dockerMounts);
         assertNull(config.dockerPorts);
+        assertNull(config.zkEnsemble);
+        assertEquals("/services/triton/instances", config.zkPath);
     }
 
     @Test
@@ -31,6 +33,8 @@ public class TarnConfigTest {
             "--docker-delayed-removal",
             "--docker-mounts", "/tmp:/tmp",
             "--docker-ports", "8000:8000,8001:8001",
+            "--zk-ensemble", "localhost:2181",
+            "--zk-path", "/test/path",
             "--scale-up", "0.9",
             "--scale-down", "0.1",
             "--min-instances", "2",
@@ -51,6 +55,8 @@ public class TarnConfigTest {
         assertTrue(config.dockerDelayedRemoval);
         assertEquals("/tmp:/tmp", config.dockerMounts);
         assertEquals("8000:8000,8001:8001", config.dockerPorts);
+        assertEquals("localhost:2181", config.zkEnsemble);
+        assertEquals("/test/path", config.zkPath);
         assertEquals("target/tarn.jar", config.jarPath);
         assertEquals("VAL1", config.customEnv.get("VAR1"));
         assertEquals("VAL2", config.customEnv.get("VAR2"));

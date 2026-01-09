@@ -38,6 +38,16 @@
                     <p class="flex justify-between"><span>Memory:</span> <span class="font-mono">${availableResources.memorySize?c} MB</span></p>
                     <p class="flex justify-between"><span>vCores:</span> <span class="font-mono">${availableResources.virtualCores?c}</span></p>
                     <p class="flex justify-between border-t border-dark-border pt-2 mt-2"><span>Target Containers:</span> <span class="font-mono">${targetNumContainers?c}</span></p>
+                    <p class="flex justify-between"><span>ZooKeeper:</span> 
+                        <#if zkEnabled>
+                            <span class="text-green-500 font-semibold">Active</span>
+                        <#else>
+                            <span class="text-gray-500">Disabled</span>
+                        </#if>
+                    </p>
+                    <#if zkEnabled>
+                        <p class="text-xs text-gray-500 mt-1 truncate">Path: ${zkPath}</p>
+                    </#if>
                 </div>
             </div>
             
