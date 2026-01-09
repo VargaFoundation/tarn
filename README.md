@@ -4,6 +4,71 @@ TARN is a scalable inference solution for running NVIDIA Triton Inference Server
 
 ## Architecture
 
+```mermaid
+graph TB
+    %% Client
+    Client[Client]
+
+    %% Load Balancer
+    subgraph LoadBalancer ["Load Balancer"]
+        HA[HAProxy Instance]
+        Updater[HAProxy Updater Script]
+    end
+
+    %% YARN Cluster
+    subgraph YARN ["YARN Cluster"]
+        RM[Resource Manager]
+
+        subgraph NM1 ["Node Manager 1"]
+            AM[Application Master]
+        end
+
+        subgraph NM2 ["Node Manager 2"]
+            TC1[Triton Container 1<br/>GPU Allocated]
+            NFS1[HDFS NFS Gateway 1]
+        end
+
+        subgraph NM3 ["Node Manager 3"]
+            TC2[Triton Container 2<br/>GPU Allocated]
+            NFS2[HDFS NFS Gateway 1]
+        end
+
+        TC1 -->|3. Load model| NFS1
+        TC2 -->|3. Load model| NFS2
+    end
+
+    %% HDFS
+    subgraph HDFS ["HDFS"]
+        NN[NameNode]
+        DN[DataNode]
+    end
+
+    %% Connexions principales (flux vertical)
+    Client -->|7. Inference Request| HA
+    HA -->|Load Balances| TC1
+    HA -->|Load Balances| TC2
+
+    %% Interactions YARN
+    AM -.->|1. Request Resources| RM
+    RM -.->|2. Allocate Containers| NM2
+    RM -.->|2. Allocate Containers| NM3
+
+    %% Découverte et mise à jour HAProxy
+    Updater -.->|4. Discover AM| RM
+    Updater -->|5. Query Instances| AM
+    Updater -->|6. Update backend servers<br/>list via Runtime API| HA
+
+    %% Accès HDFS via NFS Gateway
+    NFS1 -.-> NN
+    NFS2 -.-> NN
+    NFS1 --> DN
+    NFS2 --> DN
+
+    %% Style pour forcer l'empilement vertical
+    classDef cluster fill:#2d2d2d,stroke:#444,color:#fff;
+    class LoadBalancer,YARN,HDFS cluster;
+```
+
 The architecture is based on a native YARN application consisting of:
 - **YARN Client**: Submits the application to the cluster.
 - **Application Master (AM)**: Manages the lifecycle of Triton containers, handles auto-scaling, and exposes a list of active instances.
@@ -200,6 +265,68 @@ This ensures that even if you have multiple GPUs on a single node, a single Trit
 ## Load Balancing and Service Discovery
 
 The script `scripts/update_haproxy.sh` dynamically discovers the Application Master using the YARN CLI and updates HAProxy configuration via its Runtime API.
+
+### HAProxy Installation and Configuration
+
+To use the dynamic load balancing feature, you need to install and configure HAProxy on a node that has access to the YARN cluster.
+
+#### 1. Installation
+
+On Debian/Ubuntu:
+```bash
+sudo apt-get update
+sudo apt-get install haproxy socat
+```
+
+On CentOS/RHEL:
+```bash
+sudo yum install haproxy socat
+```
+
+#### 2. Configuration
+
+Edit `/etc/haproxy/haproxy.cfg` to include the Runtime API and a backend with empty slots.
+
+```haproxy
+global
+    # Enable the Runtime API via a Unix socket
+    stats socket /var/run/haproxy.sock mode 660 level admin
+    stats timeout 30s
+
+defaults
+    mode http
+    timeout connect 5s
+    timeout client 50s
+    timeout server 50s
+
+frontend triton_frontend
+    bind *:80
+    default_backend triton_backend
+
+backend triton_backend
+    balance roundrobin
+    # Define placeholder slots that will be updated by the script.
+    # The number of slots should be >= max-instances.
+    server triton-1 0.0.0.0:8000 check disabled
+    server triton-2 0.0.0.0:8000 check disabled
+    server triton-3 0.0.0.0:8000 check disabled
+    server triton-4 0.0.0.0:8000 check disabled
+    server triton-5 0.0.0.0:8000 check disabled
+    server triton-6 0.0.0.0:8000 check disabled
+    server triton-7 0.0.0.0:8000 check disabled
+    server triton-8 0.0.0.0:8000 check disabled
+```
+
+#### 3. Permissions
+
+Ensure the user running the `update_haproxy.sh` script has permissions to write to the HAProxy socket:
+
+```bash
+sudo chown root:haproxy /var/run/haproxy.sock
+sudo chmod 660 /var/run/haproxy.sock
+# Add your user to the haproxy group
+sudo usermod -a -G haproxy $USER
+```
 
 ### Usage
 
