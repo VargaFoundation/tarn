@@ -301,7 +301,7 @@
                             <licenseName>apache_v2</licenseName>
                             <organizationName>Varga Foundation</organizationName>
                             <inceptionYear>2025</inceptionYear>
-                            <projectName>Weave</projectName>
+                            <projectName>Tarn</projectName>
                             <addJavaLicenseAfterPackage>true</addJavaLicenseAfterPackage>
                             <canUpdateCopyright>true</canUpdateCopyright>
                             <canUpdateDescription>true</canUpdateDescription>
@@ -330,7 +330,7 @@
                             <licenseName>apache_v2</licenseName>
                             <organizationName>Varga Foundation</organizationName>
                             <inceptionYear>2025</inceptionYear>
-                            <projectName>Weave</projectName>
+                            <projectName>Tarn</projectName>
                             <addJavaLicenseAfterPackage>true</addJavaLicenseAfterPackage>
                             <canUpdateCopyright>true</canUpdateCopyright>
                             <canUpdateLicense>true</canUpdateLicense>
