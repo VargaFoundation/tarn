@@ -1,4 +1,20 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
+
 
 import org.apache.ranger.plugin.audit.RangerDefaultAuditHandler;
 import org.apache.ranger.plugin.policyengine.RangerAccessRequestImpl;
@@ -9,7 +25,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Date;
-import java.util.HashSet;
 import java.util.Set;
 
 public class RangerAuthorizer {
@@ -25,7 +40,7 @@ public class RangerAuthorizer {
                 log.info("Initializing Apache Ranger plugin for service: {}, appId: {}", config.rangerService, config.rangerAppId);
                 plugin = createPlugin(config.rangerService, config.rangerAppId);
                 plugin.init();
-                
+
                 if (config.rangerAudit) {
                     log.info("Enabling Apache Ranger auditing");
                     auditHandler = new RangerDefaultAuditHandler();
@@ -58,18 +73,18 @@ public class RangerAuthorizer {
         request.setClientIPAddress("0.0.0.0"); // Could be improved if we pass the real IP
 
         RangerAccessResult result = plugin.isAccessAllowed(request, auditHandler);
-        
+
         if (result != null && result.getIsAudited() && auditHandler != null) {
             // Ranger normally handles audit via the auditHandler passed to isAccessAllowed,
             // but we can add additional logging or logic here if needed.
         }
 
         boolean allowed = result != null && result.getIsAllowed();
-        
+
         if (!allowed) {
             log.debug("Ranger DENY: user={}, action={}, model={}", user, action, model);
         }
-        
+
         return allowed;
     }
 

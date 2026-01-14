@@ -1,4 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+
+    Copyright © 2008 Varga Foundation (contact@varga.org)
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
 	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
 	<modelVersion>4.0.0</modelVersion>
@@ -164,6 +181,177 @@
 					</execution>
 				</executions>
 			</plugin>
+
+
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>license-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>aggregate-add-third-party</id>
+                        <goals>
+                            <goal>aggregate-add-third-party</goal>
+                        </goals>
+                        <phase>dont-execute</phase>
+                        <configuration>
+                            <fileTemplate>./third-party-file.ftl</fileTemplate>
+                            <includeTransitiveDependencies>true</includeTransitiveDependencies>
+                            <licenseMerges>
+                                <licenseMerge>Apache Software License, Version 2.0|The Apache Software License, Version
+                                    2.0|Apache License Version 2.0|Apache License, Version 2.0|Apache Public License
+                                    2.0|Apache License 2.0|Apache Software License - Version 2.0|Apache 2.0
+                                    License|Apache 2.0 license|Apache License V2.0|Apache 2|Apache License|Apache|ASF
+                                    2.0|Apache 2.0|Apache-2.0|The Apache License, Version 2.0|Apache License v2|Apache
+                                    License Version 2|ASL, version 2|Apache License, version 2.0|The Apache Software
+                                    License, Version 2.0|
+                                    Apache License Version 2|Apache Public License 2.0|Apache v2
+                                </licenseMerge>
+                                <!-- Ant-contrib is an Apache License -->
+                                <licenseMerge>Apache Software License, Version
+                                    2.0|http://ant-contrib.sourceforge.net/tasks/LICENSE.txt
+                                </licenseMerge>
+                                <!-- XML Commons claims these licenses, but it's really Apache License: https://xerces.apache.org/xml-commons/licenses.html -->
+                                <licenseMerge>Apache Software License, Version 2.0|The SAX License|The W3C License
+                                </licenseMerge>
+                                <!-- Log4j Implemented Over SLF4J -->
+                                <licenseMerge>Apache Software License, Version 2.0|Apache Software Licenses
+                                </licenseMerge>
+
+                                <licenseMerge>BSD License|The BSD License|BSD licence|BSD license|BSD|BSD-style
+                                    license|New BSD License|New BSD license|Revised BSD License|BSD 2-Clause
+                                    license|3-Clause BSD License|BSD 3-Clause "New" or "Revised" License
+                                    (BSD-3-Clause)|Revised BSD|BSD 3-Clause License|BSD 3-clause New License|
+                                    BSD-2-Clause|The BSD 3-Clause License|The New BSD License
+                                </licenseMerge>
+                                <!-- Coverity uses modified BSD: https://github.com/coverity/coverity-security-library -->
+                                <licenseMerge>BSD License|BSD style modified by Coverity</licenseMerge>
+                                <!-- Jaxen claims this license, but it's really BSD: http://jaxen.codehaus.org/license.html -->
+                                <licenseMerge>BSD License|http://jaxen.codehaus.org/license.html</licenseMerge>
+
+                                <licenseMerge>Common Development and Distribution License (CDDL)|Common Development and
+                                    Distribution License (CDDL) v1.0|COMMON DEVELOPMENT AND DISTRIBUTION LICENSE (CDDL)
+                                    Version 1.0|Common Development and Distribution License|CDDL, v1.0|CDDL 1.0
+                                    license|CDDL 1.0|CDDL 1.1|CDDL
+                                </licenseMerge>
+                                <!-- Jersey / Java Servlet API claims this license, but is actually CDDL 1.0: http://servlet-spec.java.net -->
+                                <licenseMerge>Common Development and Distribution License (CDDL)|CDDL + GPLv2 with
+                                    classpath exception
+                                </licenseMerge>
+                                <!-- Jersey claims this license, but it is dual licensed with CDDL 1.1 being one: https://jersey.java.net/license.html -->
+                                <licenseMerge>Common Development and Distribution License (CDDL)|CDDL+GPL License
+                                </licenseMerge>
+                                <!-- JavaMail claims this license, but it is dual licensed with CDDL being one: https://java.net/projects/javamail/pages/License -->
+                                <licenseMerge>Common Development and Distribution License (CDDL)|GPLv2+CE</licenseMerge>
+                                <!-- JAXB claims this license, but it is dual licensed with CDDL being one: https://jaxb.java.net/ -->
+                                <licenseMerge>Common Development and Distribution License (CDDL)|GPL2 w/ CPE
+                                </licenseMerge>
+
+                                <licenseMerge>Eclipse Public License|Eclipse Public License - Version 1.0|Eclipse Public
+                                    License - v 1.0|EPL 1.0 license|Eclipse Public License 1.0|Eclipse Public License,
+                                    Version 1.0|Eclipse Public License, Version 2.0|Eclipse Public License - v 1.0|
+                                    Eclipse Public License v1.0|Eclipse Public License v2.0|EPL 2.0
+                                </licenseMerge>
+                                <!-- JUnit claims this license but is actually Eclipse Public License: http://junit.org/license.html -->
+                                <licenseMerge>Eclipse Public License|Common Public License Version 1.0</licenseMerge>
+
+                                <licenseMerge>GNU Lesser General Public License (LGPL)|The GNU Lesser General Public
+                                    License, Version 2.1|GNU Lesser General Public License (LGPL), Version 2.1|GNU
+                                    LESSER GENERAL PUBLIC LICENSE, Version 2.1|GNU Lesser General Public License,
+                                    version 2.1|GNU LESSER GENERAL PUBLIC LICENSE|GNU Lesser General Public License|GNU
+                                    Lesser Public License|GNU Lesser General Public License, Version 2.1|Lesser General
+                                    Public License (LGPL) v 2.1|LGPL 2.1|LGPL 2.1 license|LGPL 3.0 license|LGPL, v2.1 or
+                                    later|LGPL|GNU General Public Library|GNU General Public License, version 2 (GPL2),
+                                    with the classpath exception|LGPL, version 2.1|GNU General Public License v2.0 only,
+                                    with Classpath exception|
+                                    GNU General Public License, Version 2 with the Classpath Exception|GNU General
+                                    Public License, version 2 (GPL2), with the classpath exception|
+                                    GNU Lesser General Public License v2.1 or later
+                                </licenseMerge>
+
+                                <licenseMerge>MIT License|The MIT License|MIT LICENSE|MIT|MIT license</licenseMerge>
+                                <!-- BouncyCastle uses a modified MIT License: http://www.bouncycastle.org/license.html -->
+                                <licenseMerge>MIT License|Bouncy Castle Licence</licenseMerge>
+
+                                <licenseMerge>Mozilla Public License|Mozilla Public License version 1.1|Mozilla Public
+                                    License 1.1 (MPL 1.1)|MPL 1.1
+                                </licenseMerge>
+                                <!-- H2 Database claims this license, but for our purposes it's MPL: http://www.h2database.com -->
+                                <licenseMerge>Mozilla Public License|MPL 2.0, and EPL 1.0</licenseMerge>
+                                <!-- "concurrent.concurrent" claims this license, but is actually Public Domain: http://mvnrepository.com/artifact/concurrent/concurrent/ -->
+                                <licenseMerge>Public Domain|Public domain, Sun Microsoystems</licenseMerge>
+                                <!-- WTFPL is essentially Public Domain: http://www.wtfpl.net/ ;) -->
+                                <licenseMerge>Public Domain|WTFPL</licenseMerge>
+                            </licenseMerges>
+                            <useMissingFile>true</useMissingFile>
+                            <missingFile>./MISSING.properties</missingFile>
+                            <failOnMissing>true</failOnMissing>
+                            <sortArtifactByName>true</sortArtifactByName>
+                            <outputDirectory>${project.basedir}</outputDirectory>
+                            <thirdPartyFilename>NOTICE</thirdPartyFilename>
+                            <excludedGroups>varga\.foundation</excludedGroups>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>update-file-header</id>
+                        <goals>
+                            <goal>update-file-header</goal>
+                        </goals>
+                        <phase>dont-execute</phase>
+                        <configuration>
+                            <licenseName>apache_v2</licenseName>
+                            <organizationName>Varga Foundation</organizationName>
+                            <inceptionYear>2025</inceptionYear>
+                            <projectName>Weave</projectName>
+                            <addJavaLicenseAfterPackage>true</addJavaLicenseAfterPackage>
+                            <canUpdateCopyright>true</canUpdateCopyright>
+                            <canUpdateDescription>true</canUpdateDescription>
+                            <canUpdateLicense>true</canUpdateLicense>
+                            <roots>
+                                <root>src/main</root>
+                                <root>src/test</root>
+                            </roots>
+                            <excludes>
+                                <exclude>**/*.json</exclude>
+                                <exclude>**/*.tar.gz</exclude>
+                                <exclude>**/*.zip</exclude>
+                                <exclude>**/*.gz</exclude>
+                                <exclude>**/*.adoc</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>check-file-header</id>
+                        <goals>
+                            <goal>check-file-header</goal>
+                        </goals>
+                        <phase>process-sources</phase>
+                        <configuration>
+                            <skipCheckLicense>${enforce.build}</skipCheckLicense>
+                            <licenseName>apache_v2</licenseName>
+                            <organizationName>Varga Foundation</organizationName>
+                            <inceptionYear>2025</inceptionYear>
+                            <projectName>Weave</projectName>
+                            <addJavaLicenseAfterPackage>true</addJavaLicenseAfterPackage>
+                            <canUpdateCopyright>true</canUpdateCopyright>
+                            <canUpdateLicense>true</canUpdateLicense>
+                            <failOnMissingHeader>true</failOnMissingHeader>
+                            <failOnNotUptodateHeader>true</failOnNotUptodateHeader>
+                            <roots>
+                                <root>src/main</root>
+                                <root>src/test</root>
+                            </roots>
+                            <excludes>
+                                <exclude>**/*.json</exclude>
+                                <exclude>**/*.tar.gz</exclude>
+                                <exclude>**/*.zip</exclude>
+                                <exclude>**/*.gz</exclude>
+                                <exclude>**/*.adoc</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
 		</plugins>
 	</build>
 

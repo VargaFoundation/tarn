@@ -1,10 +1,23 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
-
 
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.ExponentialBackoffRetry;
-import org.apache.zookeeper.CreateMode;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -19,6 +32,7 @@ import org.apache.hadoop.yarn.client.api.async.AMRMClientAsync;
 import org.apache.hadoop.yarn.client.api.async.NMClientAsync;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.Records;
+import org.apache.zookeeper.CreateMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -72,7 +86,7 @@ public class ApplicationMaster {
 
     public void run() throws Exception {
         log.info("Starting ApplicationMaster...");
-        
+
         discoveryServer = new DiscoveryServer(config, this);
         discoveryServer.start();
 
@@ -119,7 +133,7 @@ public class ApplicationMaster {
 
         RegisterApplicationMasterResponse response = amRMClient.registerApplicationMaster(appMasterHostname, config.amPort,
                 "http://" + appMasterHostname + ":" + config.amPort, constraints);
-        
+
         // Recover running containers if this is an AM restart
         List<Container> previousContainers = response.getContainersFromPreviousAttempts();
         if (previousContainers != null && !previousContainers.isEmpty()) {
@@ -130,7 +144,7 @@ public class ApplicationMaster {
             }
         }
 
-        log.info("ApplicationMaster registered with RM at {}:{} with anti-affinity constraints on tag '{}'", 
+        log.info("ApplicationMaster registered with RM at {}:{} with anti-affinity constraints on tag '{}'",
                 appMasterHostname, config.amPort, config.placementTag);
 
         // Initial request for Triton containers
@@ -203,7 +217,7 @@ public class ApplicationMaster {
         int currentCount = runningContainers.size();
         int currentTarget = targetNumContainers.get();
         log.info("Monitoring instances... Current active: {}, Target: {}", currentCount, currentTarget);
-        
+
         // 1. Handle failover (ensure we have enough containers for current target)
         if (currentCount < currentTarget) {
             log.info("Current count {} below target {}, requesting more...", currentCount, currentTarget);
@@ -213,7 +227,7 @@ public class ApplicationMaster {
         // 2. Handle auto-scaling
         double avgLoad = getAverageLoad();
         int newTarget = scalingPolicy.calculateTarget(currentTarget, avgLoad);
-        
+
         if (newTarget > currentTarget) {
             targetNumContainers.set(newTarget);
             requestContainers();
@@ -249,12 +263,12 @@ public class ApplicationMaster {
 
     private void registerInZooKeeper(Container container) {
         if (zkClient == null) return;
-        
+
         String host = container.getNodeId().getHost();
         String containerId = container.getId().toString();
         String path = config.zkPath + "/" + containerId;
         String data = host + ":" + config.tritonPort;
-        
+
         try {
             if (zkClient.checkExists().forPath(path) != null) {
                 zkClient.delete().forPath(path);
@@ -270,7 +284,7 @@ public class ApplicationMaster {
 
     private void unregisterFromZooKeeper(ContainerId containerId) {
         if (zkClient == null) return;
-        
+
         String path = config.zkPath + "/" + containerId.toString();
         try {
             if (zkClient.checkExists().forPath(path) != null) {
@@ -315,7 +329,7 @@ public class ApplicationMaster {
             if (config.dockerPorts != null && !config.dockerPorts.isEmpty()) {
                 env.put("YARN_CONTAINER_RUNTIME_DOCKER_PORTS_MAPPING", config.dockerPorts);
             }
-            
+
             // Apply custom environment variables
             for (Map.Entry<String, String> entry : config.customEnv.entrySet()) {
                 env.put(entry.getKey(), entry.getValue());
@@ -323,7 +337,7 @@ public class ApplicationMaster {
 
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_CONTAINER_HOSTNAME", container.getId().toString());
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS", "true");
-            
+
             // Add secrets from JCEKS to environment
             if (config.secretsPath != null) {
                 try {
@@ -335,7 +349,7 @@ public class ApplicationMaster {
                         providerPath = providerPath.replace("hdfs://", "jceks://hdfs");
                     }
                     secretConf.set("hadoop.security.credential.provider.path", providerPath);
-                    
+
                     // Standard Hugging Face token
                     char[] hfToken = secretConf.getPassword("huggingface.token");
                     if (hfToken != null) {
@@ -357,7 +371,7 @@ public class ApplicationMaster {
                                     }
                                 })
                                 .toList();
-                                
+
                         for (String alias : aliases) {
                             if (alias.startsWith("tarn.env.")) {
                                 String envVar = alias.substring("tarn.env.".length());
@@ -400,17 +414,30 @@ public class ApplicationMaster {
         @Override
         public void onContainersCompleted(List<ContainerStatus> statuses) {
             for (ContainerStatus status : statuses) {
-                log.info("Container completed: {}. State: {}. Exit Status: {}. Diagnostics: {}", 
+                log.info("Container completed: {}. State: {}. Exit Status: {}. Diagnostics: {}",
                         status.getContainerId(), status.getState(), status.getExitStatus(), status.getDiagnostics());
                 runningContainers.removeIf(c -> c.getId().equals(status.getContainerId()));
                 unregisterFromZooKeeper(status.getContainerId());
             }
         }
 
-        @Override public void onShutdownRequest() { log.info("Shutdown requested"); }
-        @Override public void onNodesUpdated(List<NodeReport> updatedNodes) {}
-        @Override public void onError(Throwable e) { log.error("RM Error", e); }
-        @Override public void onContainersUpdated(List<UpdatedContainer> containers) {}
+        @Override
+        public void onShutdownRequest() {
+            log.info("Shutdown requested");
+        }
+
+        @Override
+        public void onNodesUpdated(List<NodeReport> updatedNodes) {
+        }
+
+        @Override
+        public void onError(Throwable e) {
+            log.error("RM Error", e);
+        }
+
+        @Override
+        public void onContainersUpdated(List<UpdatedContainer> containers) {
+        }
 
         @Override
         public float getProgress() {
@@ -420,23 +447,51 @@ public class ApplicationMaster {
     }
 
     private class NMCallbackHandler extends NMClientAsync.AbstractCallbackHandler {
-        @Override public void onContainerStarted(ContainerId containerId, Map<String, ByteBuffer> allServiceKeys) { log.info("Container started: {}", containerId); }
-        @Override public void onContainerStatusReceived(ContainerId containerId, ContainerStatus containerStatus) {}
-        @Override public void onContainerStopped(ContainerId containerId) {
+        @Override
+        public void onContainerStarted(ContainerId containerId, Map<String, ByteBuffer> allServiceKeys) {
+            log.info("Container started: {}", containerId);
+        }
+
+        @Override
+        public void onContainerStatusReceived(ContainerId containerId, ContainerStatus containerStatus) {
+        }
+
+        @Override
+        public void onContainerStopped(ContainerId containerId) {
             log.info("Container stopped: {}", containerId);
             runningContainers.removeIf(c -> c.getId().equals(containerId));
             unregisterFromZooKeeper(containerId);
         }
-        @Override public void onStartContainerError(ContainerId containerId, Throwable t) { 
-            log.error("Start error for {}", containerId, t); 
+
+        @Override
+        public void onStartContainerError(ContainerId containerId, Throwable t) {
+            log.error("Start error for {}", containerId, t);
             unregisterFromZooKeeper(containerId);
         }
-        @Override public void onContainerResourceIncreased(ContainerId containerId, Resource resource) {}
-        @Override public void onContainerResourceUpdated(ContainerId containerId, Resource resource) {}
-        @Override public void onIncreaseContainerResourceError(ContainerId containerId, Throwable t) {}
-        @Override public void onUpdateContainerResourceError(ContainerId containerId, Throwable t) {}
-        @Override public void onGetContainerStatusError(ContainerId containerId, Throwable t) {}
-        @Override public void onStopContainerError(ContainerId containerId, Throwable t) {}
+
+        @Override
+        public void onContainerResourceIncreased(ContainerId containerId, Resource resource) {
+        }
+
+        @Override
+        public void onContainerResourceUpdated(ContainerId containerId, Resource resource) {
+        }
+
+        @Override
+        public void onIncreaseContainerResourceError(ContainerId containerId, Throwable t) {
+        }
+
+        @Override
+        public void onUpdateContainerResourceError(ContainerId containerId, Throwable t) {
+        }
+
+        @Override
+        public void onGetContainerStatusError(ContainerId containerId, Throwable t) {
+        }
+
+        @Override
+        public void onStopContainerError(ContainerId containerId, Throwable t) {
+        }
     }
 
     public List<Container> getRunningContainers() {

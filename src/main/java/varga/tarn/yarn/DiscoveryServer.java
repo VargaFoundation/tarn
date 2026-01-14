@@ -1,30 +1,40 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
-import org.apache.hadoop.yarn.api.records.Container;
-import org.apache.hadoop.yarn.api.records.Resource;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import freemarker.template.Configuration;
 import freemarker.template.Template;
 import freemarker.template.TemplateExceptionHandler;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.yarn.api.records.Container;
+import org.apache.hadoop.yarn.api.records.Resource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.StringWriter;
 import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.HashSet;
-import java.util.Arrays;
+import java.util.*;
 
 public class DiscoveryServer {
     private static final Logger log = LoggerFactory.getLogger(DiscoveryServer.class);
@@ -38,7 +48,7 @@ public class DiscoveryServer {
         this.config = config;
         this.am = am;
         this.httpServer = HttpServer.create(new InetSocketAddress(config.bindAddress, config.amPort), 0);
-        
+
         // Initialize FreeMarker
         this.freeMarkerConfig = new Configuration(Configuration.VERSION_2_3_32);
         this.freeMarkerConfig.setClassLoaderForTemplateLoading(this.getClass().getClassLoader(), "templates");
@@ -153,7 +163,7 @@ public class DiscoveryServer {
             if (!isAuthorized(exchange)) return;
 
             Map<String, Object> model = new HashMap<>();
-            
+
             // Global Resources
             Resource res = am.getAvailableResources();
             Map<String, Object> resMap = new HashMap<>();
@@ -187,7 +197,7 @@ public class DiscoveryServer {
             List<String> authorizedModels = new ArrayList<>();
             String user = getRequestUser(exchange);
             java.util.Set<String> groups = getUserGroups(user);
-            
+
             for (String m : allModels) {
                 if (am.getRangerAuthorizer().isAllowed(user, groups, "list", m)) {
                     authorizedModels.add(m);
@@ -201,10 +211,11 @@ public class DiscoveryServer {
                 String firstHost = containers.get(0).getNodeId().getHost();
                 model.put("sampleHost", firstHost);
                 String rawModelsJson = am.getMetricsCollector().fetchLoadedModels(firstHost, config.tritonPort);
-                
+
                 // Filter loaded models based on metadata permission
                 try {
-                    List<Map<String, Object>> modelsList = objectMapper.readValue(rawModelsJson, new TypeReference<List<Map<String, Object>>>() {});
+                    List<Map<String, Object>> modelsList = objectMapper.readValue(rawModelsJson, new TypeReference<List<Map<String, Object>>>() {
+                    });
                     List<Map<String, Object>> filteredModelsList = new ArrayList<>();
                     for (Map<String, Object> m : modelsList) {
                         String modelName = (String) m.get("name");
@@ -223,7 +234,7 @@ public class DiscoveryServer {
                 Template temp = freeMarkerConfig.getTemplate("dashboard.ftl");
                 temp.process(model, out);
                 String response = out.toString();
-                
+
                 exchange.getResponseHeaders().set("Content-Type", "text/html");
                 byte[] responseBytes = response.getBytes("UTF-8");
                 exchange.sendResponseHeaders(200, responseBytes.length);
@@ -265,9 +276,9 @@ public class DiscoveryServer {
                     String host = c.getNodeId().getHost();
                     String cid = c.getId().toString();
                     double load = am.getMetricsCollector().fetchContainerLoad(host);
-                    
+
                     sb.append("tarn_container_load{container_id=\"").append(cid).append("\",host=\"").append(host).append("\"} ").append(load).append("\n");
-                    
+
                     Map<String, Map<String, String>> gpuMetrics = am.getMetricsCollector().fetchGpuMetricsStructured(host);
                     for (Map.Entry<String, Map<String, String>> gpuEntry : gpuMetrics.entrySet()) {
                         String gpuId = gpuEntry.getKey();
@@ -275,10 +286,10 @@ public class DiscoveryServer {
                             String metricName = metricEntry.getKey();
                             String value = metricEntry.getValue();
                             sb.append("tarn_gpu_").append(metricName)
-                              .append("{container_id=\"").append(cid)
-                              .append("\",host=\"").append(host)
-                              .append("\",gpu=\"").append(gpuId)
-                              .append("\"} ").append(value).append("\n");
+                                    .append("{container_id=\"").append(cid)
+                                    .append("\",host=\"").append(host)
+                                    .append("\",gpu=\"").append(gpuId)
+                                    .append("\"} ").append(value).append("\n");
                         }
                     }
                 }
@@ -350,7 +361,7 @@ public class DiscoveryServer {
             sb.append("minContainers: ").append(config.minContainers).append("\n");
             sb.append("maxContainers: ").append(config.maxContainers).append("\n");
             sb.append("scaleCooldownMs: ").append(config.scaleCooldownMs).append("\n");
-            
+
             if (!config.customEnv.isEmpty()) {
                 sb.append("\nCustom Environment:\n");
                 for (Map.Entry<String, String> entry : config.customEnv.entrySet()) {

@@ -1,5 +1,23 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
 
+
+import org.apache.commons.cli.HelpFormatter;
+import org.apache.commons.cli.ParseException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -10,13 +28,13 @@ import org.apache.hadoop.yarn.client.api.YarnClient;
 import org.apache.hadoop.yarn.client.api.YarnClientApplication;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.Records;
-import org.apache.commons.cli.*;
-
-import java.io.IOException;
-import java.util.*;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * YARN Client for submitting the Triton application.
@@ -116,10 +134,10 @@ public class Client {
             env.put("RANGER_APP_ID", config.rangerAppId);
         }
         env.put("RANGER_AUDIT", String.valueOf(config.rangerAudit));
-        
+
         // Add classpath to environment
         StringBuilder classPathEnv = new StringBuilder(ApplicationConstants.Environment.CLASSPATH.$())
-            .append(ApplicationConstants.CLASS_PATH_SEPARATOR).append("./*");
+                .append(ApplicationConstants.CLASS_PATH_SEPARATOR).append("./*");
         for (String c : conf.getStrings(YarnConfiguration.YARN_APPLICATION_CLASSPATH,
                 YarnConfiguration.DEFAULT_YARN_CROSS_PLATFORM_APPLICATION_CLASSPATH)) {
             classPathEnv.append(ApplicationConstants.CLASS_PATH_SEPARATOR);
@@ -195,10 +213,10 @@ public class Client {
     private void setupAppJar(Path jarPath, Map<String, LocalResource> localResources, ApplicationId appId) throws IOException {
         FileSystem fs = FileSystem.get(conf);
         Path destPath = new Path(fs.getHomeDirectory(), ".tarn/jars/" + appId.toString() + "/tarn.jar");
-        
+
         log.info("Uploading JAR from {} to {}", jarPath, destPath);
         fs.copyFromLocalFile(false, true, jarPath, destPath);
-        
+
         FileStatus destStatus = fs.getFileStatus(destPath);
         LocalResource jarResource = Records.newRecord(LocalResource.class);
         jarResource.setResource(URL.fromPath(destPath));
@@ -206,7 +224,7 @@ public class Client {
         jarResource.setTimestamp(destStatus.getModificationTime());
         jarResource.setType(LocalResourceType.FILE);
         jarResource.setVisibility(LocalResourceVisibility.APPLICATION);
-        
+
         localResources.put("tarn.jar", jarResource);
     }
 

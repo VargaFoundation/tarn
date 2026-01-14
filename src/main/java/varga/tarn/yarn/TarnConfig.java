@@ -1,6 +1,23 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
 
+
 import org.apache.commons.cli.*;
+
 import java.util.HashMap;
 import java.util.Map;
 
@@ -31,7 +48,7 @@ public class TarnConfig {
     public String rangerAppId;
     public boolean rangerAudit;
     public Map<String, String> customEnv = new HashMap<>();
-    
+
     // Scaling properties
     public double scaleUpThreshold;
     public double scaleDownThreshold;
@@ -65,7 +82,7 @@ public class TarnConfig {
         rangerService = getEnv("RANGER_SERVICE", null);
         rangerAppId = getEnv("RANGER_APP_ID", "tarn");
         rangerAudit = Boolean.parseBoolean(getEnv("RANGER_AUDIT", "true"));
-        
+
         scaleUpThreshold = Double.parseDouble(getEnv("SCALE_UP_THRESHOLD", "0.7"));
         scaleDownThreshold = Double.parseDouble(getEnv("SCALE_DOWN_THRESHOLD", "0.2"));
         minContainers = Integer.parseInt(getEnv("MIN_CONTAINERS", "1"));
@@ -115,7 +132,7 @@ public class TarnConfig {
                 }
             }
         }
-        
+
         if (line.hasOption("scale-up")) scaleUpThreshold = Double.parseDouble(line.getOptionValue("scale-up"));
         if (line.hasOption("scale-down")) scaleDownThreshold = Double.parseDouble(line.getOptionValue("scale-down"));
         if (line.hasOption("min-instances")) minContainers = Integer.parseInt(line.getOptionValue("min-instances"));
@@ -148,11 +165,11 @@ public class TarnConfig {
         options.addOption("ra", "ranger-app-id", true, "Apache Ranger App ID (default: tarn)");
         options.addOption("raudit", "ranger-audit", false, "Enable Apache Ranger auditing");
         options.addOption("j", "jar", true, "Path to the application JAR (local, will be uploaded to HDFS)");
-        
+
         Option envOption = new Option("e", "env", true, "Custom environment variables (KEY=VALUE)");
         envOption.setArgs(Option.UNLIMITED_VALUES);
         options.addOption(envOption);
-        
+
         options.addOption("su", "scale-up", true, "Scale up threshold (0.0-1.0)");
         options.addOption("sd", "scale-down", true, "Scale down threshold (0.0-1.0)");
         options.addOption("min", "min-instances", true, "Minimum number of instances");

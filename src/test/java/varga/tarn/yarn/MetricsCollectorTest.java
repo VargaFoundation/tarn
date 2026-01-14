@@ -1,7 +1,24 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
 
+
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class MetricsCollectorTest {
 
@@ -9,10 +26,10 @@ public class MetricsCollectorTest {
     public void testParseLoadFromMetricsGpu() {
         MetricsCollector collector = new MetricsCollector(8002);
         String metrics = "# HELP nv_gpu_utilization GPU utilization (0.0 - 1.0)\n" +
-                         "# TYPE nv_gpu_utilization gauge\n" +
-                         "nv_gpu_utilization{gpu=\"0\",uuid=\"GPU-123\"} 45.5\n" +
-                         "nv_gpu_utilization{gpu=\"1\",uuid=\"GPU-456\"} 55.5";
-        
+                "# TYPE nv_gpu_utilization gauge\n" +
+                "nv_gpu_utilization{gpu=\"0\",uuid=\"GPU-123\"} 45.5\n" +
+                "nv_gpu_utilization{gpu=\"1\",uuid=\"GPU-456\"} 55.5";
+
         double load = collector.parseLoadFromMetrics(metrics);
         assertEquals(0.505, load, 0.001);
     }
@@ -21,7 +38,7 @@ public class MetricsCollectorTest {
     public void testParseLoadFromMetricsFallback() {
         MetricsCollector collector = new MetricsCollector(8002);
         String metrics = "nv_inference_request_success{model=\"resnet\",version=\"1\"} 100";
-        
+
         double load = collector.parseLoadFromMetrics(metrics);
         assertEquals(0.3, load);
     }

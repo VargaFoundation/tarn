@@ -1,4 +1,20 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
+
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -92,7 +108,7 @@ public class MetricsCollector {
             String metric = m.group(1).replace("nv_gpu_", "");
             String gpuId = m.group(2);
             String value = m.group(3);
-            
+
             gpus.computeIfAbsent(gpuId, k -> new LinkedHashMap<>()).put(metric, value);
         }
         return gpus;
@@ -100,7 +116,7 @@ public class MetricsCollector {
 
     public double parseLoadFromMetrics(String metrics) {
         if (metrics == null || metrics.isEmpty()) return 0.0;
-        
+
         // Try to find GPU utilization first
         Pattern gpuPattern = Pattern.compile("nv_gpu_utilization\\{[^}]*\\}\\s+([\\d.]+)");
         Matcher gpuMatcher = gpuPattern.matcher(metrics);

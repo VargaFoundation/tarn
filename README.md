@@ -826,3 +826,18 @@ Available metrics:
 - `tarn_container_load`: Per-container load based on GPU or request activity.
 - `tarn_gpu_utilization`: Per-GPU utilization.
 - `tarn_gpu_memory_used`: Per-GPU memory usage.
+
+
+#### License
+
+##### Update third parties license file
+
+Update the content of the file NOTICE:
+
+    mvn org.codehaus.mojo:license-maven-plugin:add-third-party@add-third-party
+
+##### Update license header on files
+
+Update license header on files
+
+    mvn org.codehaus.mojo:license-maven-plugin:update-file-header@update-file-header

@@ -1,11 +1,23 @@
+/*
+ * Copyright © 2008 Varga Foundation (contact@varga.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package varga.tarn.yarn;
 
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.NodeId;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.*;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -13,6 +25,11 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class DiscoveryServerTest {
 
@@ -41,16 +58,16 @@ public class DiscoveryServerTest {
         ApplicationMaster mockAm = mock(ApplicationMaster.class);
         MetricsCollector mockMetrics = mock(MetricsCollector.class);
         RangerAuthorizer mockAuthorizer = mock(RangerAuthorizer.class);
-        
+
         when(mockMetrics.fetchLoadedModels(anyString(), anyInt())).thenReturn("[{\"name\":\"model1\",\"state\":\"READY\"}, {\"name\":\"model2\",\"state\":\"READY\"}]");
         when(mockMetrics.fetchContainerLoad(anyString())).thenReturn(0.5);
         when(mockMetrics.fetchGpuMetricsStructured(anyString())).thenReturn(new java.util.HashMap<>());
-        
+
         when(mockAuthorizer.isAllowed(anyString(), anySet(), eq("list"), anyString())).thenReturn(true);
         when(mockAuthorizer.isAllowed(anyString(), anySet(), eq("metadata"), eq("model1"))).thenReturn(true);
         when(mockAuthorizer.isAllowed(anyString(), anySet(), eq("metadata"), eq("model2"))).thenReturn(false);
         when(mockAuthorizer.isAllowed(anyString(), anySet(), eq("infer"), eq("model1"))).thenReturn(true);
-        
+
         when(mockAm.getRunningContainers()).thenReturn(containers);
         when(mockAm.getAvailableModels()).thenReturn(new ArrayList<>());
         when(mockAm.getMetricsCollector()).thenReturn(mockMetrics);
@@ -63,7 +80,7 @@ public class DiscoveryServerTest {
 
         try {
             HttpClient client = HttpClient.newHttpClient();
-            
+
             // 1. Unauthenticated request
             HttpRequest req1 = HttpRequest.newBuilder()
                     .uri(URI.create("http://127.0.0.1:" + actualPort + "/instances"))
