@@ -581,12 +581,21 @@ Example `ranger-triton-audit.xml`:
 Apache Knox can be configured to act as a **Policy Enforcement Point (PEP)** by leveraging the TARN Authorization API or by using the Ranger Knox Plugin.
 
 **Using the Authorization API in Knox:**
-1.  **Service Definition**: Define a Knox service for Triton that captures the model name from the URL (e.g., `/v2/models/{model}/infer`).
-2.  **Authorization Check**: Configure Knox (or a custom dispatcher) to call the TARN AM `/authorize` endpoint before routing the request:
-    ```bash
-    # Check if alice is allowed to infer on resnet50
-    GET http://<AM_HOST>:<AM_PORT>/authorize?model=resnet50&action=infer&user=alice
-    ```
+
+To integrate Knox with the TARN Authorization API, you can use a custom Rewrite Rule or a specialized Dispatcher.
+
+1.  **Service Definition**: Define a Knox service for Triton.
+2.  **Authorization Check**: Configure a Rewrite Rule to perform an out-of-band check or use a custom Knox Dispatcher that calls the TARN AM `/authorize` endpoint.
+
+Example Knox Rewrite Rule for Authorization (pseudo-config):
+```xml
+<rules>
+    <rule dir="IN" name="TRITON/authorize-check" pattern="*://*:*/**/v2/models/{model}/{action}">
+        <rewrite template="http://am-host:8888/authorize?model={model}&amp;action={action}&amp;user={$username}"/>
+    </rule>
+</rules>
+```
+
 3.  **Propagation**: Knox should propagate the original user identity using the `X-TARN-User` header when talking to the AM for authorization checks.
 
 **Using the Ranger Knox Plugin:**
@@ -600,7 +609,18 @@ Example Knox Topology with Ranger Authorization:
             <role>authentication</role>
             <name>ShiroProvider</name>
             <enabled>true</enabled>
-            <!-- LDAP/PAM config -->
+            <param>
+                <name>main.ldapRealm</name>
+                <value>org.apache.knox.gateway.shirorealm.KnoxLdapRealm</value>
+            </param>
+            <param>
+                <name>main.ldapRealm.userDnTemplate</name>
+                <value>uid={0},ou=people,dc=hadoop,dc=apache,dc=org</value>
+            </param>
+            <param>
+                <name>main.ldapRealm.contextFactory.url</name>
+                <value>ldap://localhost:33389</value>
+            </param>
         </provider>
         <provider>
             <role>authorization</role>
@@ -610,6 +630,7 @@ Example Knox Topology with Ranger Authorization:
     </gateway>
     <service>
         <role>TRITON</role>
+        <url>http://haproxy-host:8000</url>
     </service>
 </topology>
 ```

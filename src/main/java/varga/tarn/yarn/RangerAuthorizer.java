@@ -23,7 +23,7 @@ public class RangerAuthorizer {
         if (config.rangerService != null && !config.rangerService.isEmpty()) {
             try {
                 log.info("Initializing Apache Ranger plugin for service: {}, appId: {}", config.rangerService, config.rangerAppId);
-                plugin = new RangerBasePlugin("triton", config.rangerAppId);
+                plugin = createPlugin(config.rangerService, config.rangerAppId);
                 plugin.init();
                 
                 if (config.rangerAudit) {
@@ -31,10 +31,14 @@ public class RangerAuthorizer {
                     auditHandler = new RangerDefaultAuditHandler();
                 }
             } catch (Throwable e) {
-                log.error("Failed to initialize Apache Ranger plugin. Authorization will be disabled.", e);
+                log.error("Failed to initialize Apache Ranger plugin. Authorization will be disabled. Error: {}", e.getMessage(), e);
                 plugin = null;
             }
         }
+    }
+
+    protected RangerBasePlugin createPlugin(String serviceName, String appId) {
+        return new RangerBasePlugin("triton", serviceName, appId);
     }
 
     public boolean isAllowed(String user, Set<String> groups, String action, String model) {
@@ -54,6 +58,12 @@ public class RangerAuthorizer {
         request.setClientIPAddress("0.0.0.0"); // Could be improved if we pass the real IP
 
         RangerAccessResult result = plugin.isAccessAllowed(request, auditHandler);
+        
+        if (result != null && result.getIsAudited() && auditHandler != null) {
+            // Ranger normally handles audit via the auditHandler passed to isAccessAllowed,
+            // but we can add additional logging or logic here if needed.
+        }
+
         boolean allowed = result != null && result.getIsAllowed();
         
         if (!allowed) {
