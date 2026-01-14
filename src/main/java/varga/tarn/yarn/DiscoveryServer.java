@@ -1,5 +1,7 @@
 package varga.tarn.yarn;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -20,6 +22,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.Arrays;
 
 public class DiscoveryServer {
     private static final Logger log = LoggerFactory.getLogger(DiscoveryServer.class);
@@ -27,6 +32,7 @@ public class DiscoveryServer {
     private final ApplicationMaster am;
     private final TarnConfig config;
     private final Configuration freeMarkerConfig;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public DiscoveryServer(TarnConfig config, ApplicationMaster am) throws IOException {
         this.config = config;
@@ -47,6 +53,7 @@ public class DiscoveryServer {
         this.httpServer.createContext("/metrics", new PrometheusHandler());
         this.httpServer.createContext("/health", new GlobalHealthHandler());
         this.httpServer.createContext("/config", new ConfigHandler());
+        this.httpServer.createContext("/authorize", new AuthorizeHandler());
         this.httpServer.setExecutor(null);
     }
 
@@ -80,6 +87,20 @@ public class DiscoveryServer {
             }
         }
         return true;
+    }
+
+    private Map<String, String> parseQueryParams(String query) {
+        Map<String, String> params = new HashMap<>();
+        if (query != null) {
+            String[] pairs = query.split("&");
+            for (String pair : pairs) {
+                int idx = pair.indexOf("=");
+                if (idx > 0 && idx < pair.length() - 1) {
+                    params.put(pair.substring(0, idx), pair.substring(idx + 1));
+                }
+            }
+        }
+        return params;
     }
 
     private String getRequestUser(HttpExchange exchange) {
@@ -175,11 +196,27 @@ public class DiscoveryServer {
             model.put("availableModels", authorizedModels);
             model.put("rangerEnabled", config.rangerService != null && !config.rangerService.isEmpty());
 
-            // Samples for models (still useful but user wanted to remove GPU sample)
+            // Samples for models
             if (!containers.isEmpty()) {
                 String firstHost = containers.get(0).getNodeId().getHost();
                 model.put("sampleHost", firstHost);
-                model.put("loadedModelsJson", am.getMetricsCollector().fetchLoadedModels(firstHost, config.tritonPort));
+                String rawModelsJson = am.getMetricsCollector().fetchLoadedModels(firstHost, config.tritonPort);
+                
+                // Filter loaded models based on metadata permission
+                try {
+                    List<Map<String, Object>> modelsList = objectMapper.readValue(rawModelsJson, new TypeReference<List<Map<String, Object>>>() {});
+                    List<Map<String, Object>> filteredModelsList = new ArrayList<>();
+                    for (Map<String, Object> m : modelsList) {
+                        String modelName = (String) m.get("name");
+                        if (am.getRangerAuthorizer().isAllowed(user, groups, "metadata", modelName)) {
+                            filteredModelsList.add(m);
+                        }
+                    }
+                    model.put("loadedModelsJson", objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(filteredModelsList));
+                } catch (Exception e) {
+                    log.warn("Failed to filter loaded models: {}", e.getMessage());
+                    model.put("loadedModelsJson", rawModelsJson);
+                }
             }
 
             try (StringWriter out = new StringWriter()) {
@@ -322,6 +359,37 @@ public class DiscoveryServer {
             }
 
             String response = sb.toString();
+            exchange.getResponseHeaders().set("Content-Type", "text/plain");
+            exchange.sendResponseHeaders(200, response.length());
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(response.getBytes());
+            }
+        }
+    }
+
+    private class AuthorizeHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!isAuthorized(exchange)) return;
+
+            Map<String, String> params = parseQueryParams(exchange.getRequestURI().getQuery());
+            String user = params.getOrDefault("user", getRequestUser(exchange));
+            String action = params.get("action");
+            String modelName = params.get("model");
+
+            if (action == null || modelName == null) {
+                String error = "Missing 'action' or 'model' parameter";
+                exchange.sendResponseHeaders(400, error.length());
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(error.getBytes());
+                }
+                return;
+            }
+
+            Set<String> groups = getUserGroups(user);
+            boolean allowed = am.getRangerAuthorizer().isAllowed(user, groups, action, modelName);
+
+            String response = String.valueOf(allowed);
             exchange.getResponseHeaders().set("Content-Type", "text/plain");
             exchange.sendResponseHeaders(200, response.length());
             try (OutputStream os = exchange.getResponseBody()) {

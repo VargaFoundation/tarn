@@ -533,8 +533,26 @@ A complete JSON service definition is available in `SPEC Ranger.md`.
 1.  **Identity Propagation**: When accessing the AM Dashboard or API, TARN identifies the user via Kerberos or the `X-TARN-User` header.
 2.  **Authorization and Auditing**: For every model available in the HDFS repository, TARN queries the Ranger plugin to check if the user has `list` permission. If `--ranger-audit` is enabled, these access attempts are logged to the configured Ranger audit destination.
 3.  **Dynamic Filtering**: Models for which the user does not have permission are automatically filtered out from the Dashboard and service discovery results.
+    - `list` permission is required to see models in the HDFS list.
+    - `metadata` permission is required to see details of loaded models.
 
-#### 5. Audit Configuration
+#### 5. Authorization API
+TARN provides a REST API to check model-level permissions. This can be used by external gateways (like Apache Knox) to enforce security for inference requests.
+
+- **Endpoint**: `http://<AM_HOST>:<AM_PORT>/authorize?model=<name>&action=<action>`
+- **Query Parameters**:
+  - `model`: The model name.
+  - `action`: The access type (`infer`, `metadata`, or `list`).
+  - `user`: (Optional) The user to check (defaults to the requester).
+- **Response**: `true` or `false`.
+
+Example:
+```bash
+curl -H "X-TARN-Token: my-token" \
+  "http://am-host:8888/authorize?model=resnet50&action=infer&user=alice"
+```
+
+#### 6. Audit Configuration
 
 To enable auditing, the following conditions must be met:
 1. The `--ranger-audit` flag must be set.
@@ -556,6 +574,44 @@ Example `ranger-triton-audit.xml`:
         <value>ranger.audit</value>
     </property>
 </configuration>
+```
+
+#### 7. Knox Authorization Integration
+
+Apache Knox can be configured to act as a **Policy Enforcement Point (PEP)** by leveraging the TARN Authorization API or by using the Ranger Knox Plugin.
+
+**Using the Authorization API in Knox:**
+1.  **Service Definition**: Define a Knox service for Triton that captures the model name from the URL (e.g., `/v2/models/{model}/infer`).
+2.  **Authorization Check**: Configure Knox (or a custom dispatcher) to call the TARN AM `/authorize` endpoint before routing the request:
+    ```bash
+    # Check if alice is allowed to infer on resnet50
+    GET http://<AM_HOST>:<AM_PORT>/authorize?model=resnet50&action=infer&user=alice
+    ```
+3.  **Propagation**: Knox should propagate the original user identity using the `X-TARN-User` header when talking to the AM for authorization checks.
+
+**Using the Ranger Knox Plugin:**
+Alternatively, you can install the `ranger-knox-plugin` on your Knox gateway and configure it to use the `triton` service definition. This allows Knox to check policies directly against the Ranger Admin server, providing the same level of security as the TARN Application Master but at the edge of the cluster.
+
+Example Knox Topology with Ranger Authorization:
+```xml
+<topology>
+    <gateway>
+        <provider>
+            <role>authentication</role>
+            <name>ShiroProvider</name>
+            <enabled>true</enabled>
+            <!-- LDAP/PAM config -->
+        </provider>
+        <provider>
+            <role>authorization</role>
+            <name>XASecurePDPKnox</name>
+            <enabled>true</enabled>
+        </provider>
+    </gateway>
+    <service>
+        <role>TRITON</role>
+    </service>
+</topology>
 ```
 
 You can include the directory containing this file in the `CLASSPATH` or use the `--env` option to pass configuration properties if supported by the Ranger version.
