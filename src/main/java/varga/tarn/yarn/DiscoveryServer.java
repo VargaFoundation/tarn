@@ -48,6 +48,7 @@ public class DiscoveryServer {
     private final TarnConfig config;
     private final Configuration freeMarkerConfig;
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final Map<String, CircuitBreaker> healthCheckCircuitBreakers = new java.util.concurrent.ConcurrentHashMap<>();
 
     public DiscoveryServer(TarnConfig config, ApplicationMaster am) throws IOException {
         this.config = config;
@@ -69,6 +70,7 @@ public class DiscoveryServer {
         this.httpServer.createContext("/health", new GlobalHealthHandler());
         this.httpServer.createContext("/config", new ConfigHandler());
         this.httpServer.createContext("/authorize", new AuthorizeHandler());
+        this.httpServer.createContext("/alerts", new AlertsHandler());
         this.httpServer.setExecutor(null);
     }
 
@@ -266,6 +268,7 @@ public class DiscoveryServer {
         public void handle(HttpExchange exchange) throws IOException {
             if (!isAuthorized(exchange)) return;
 
+            MetricsCollector mc = am.getMetricsCollector();
             StringBuilder sb = new StringBuilder();
             sb.append("# HELP tarn_target_containers Target number of containers\n");
             sb.append("# TYPE tarn_target_containers gauge\n");
@@ -276,15 +279,32 @@ public class DiscoveryServer {
             sb.append("# TYPE tarn_running_containers gauge\n");
             sb.append("tarn_running_containers ").append(containers.size()).append("\n");
 
+            // Queue depth for predictive scaling
+            sb.append("# HELP tarn_queue_depth_total Total queue depth across all containers\n");
+            sb.append("# TYPE tarn_queue_depth_total gauge\n");
+            sb.append("tarn_queue_depth_total ").append(mc.getTotalQueueDepth()).append("\n");
+
             synchronized (containers) {
                 for (Container c : containers) {
                     String host = c.getNodeId().getHost();
                     String cid = c.getId().toString();
-                    double load = am.getMetricsCollector().fetchContainerLoad(host);
+                    double load = mc.fetchContainerLoad(host);
 
                     sb.append("tarn_container_load{container_id=\"").append(cid).append("\",host=\"").append(host).append("\"} ").append(load).append("\n");
 
-                    Map<String, Map<String, String>> gpuMetrics = am.getMetricsCollector().fetchGpuMetricsStructured(host);
+                    // Container startup time
+                    Long startupTime = mc.getContainerStartupTime(cid);
+                    if (startupTime != null) {
+                        sb.append("# HELP tarn_container_startup_ms Container startup time in milliseconds\n");
+                        sb.append("# TYPE tarn_container_startup_ms gauge\n");
+                        sb.append("tarn_container_startup_ms{container_id=\"").append(cid).append("\"} ").append(startupTime).append("\n");
+                    }
+
+                    // Queue depth per container
+                    int queueDepth = mc.getQueueDepth(cid);
+                    sb.append("tarn_container_queue_depth{container_id=\"").append(cid).append("\",host=\"").append(host).append("\"} ").append(queueDepth).append("\n");
+
+                    Map<String, Map<String, String>> gpuMetrics = mc.fetchGpuMetricsStructured(host);
                     for (Map.Entry<String, Map<String, String>> gpuEntry : gpuMetrics.entrySet()) {
                         String gpuId = gpuEntry.getKey();
                         for (Map.Entry<String, String> metricEntry : gpuEntry.getValue().entrySet()) {
@@ -298,6 +318,27 @@ public class DiscoveryServer {
                         }
                     }
                 }
+            }
+
+            // Inference latency percentiles per model
+            sb.append("\n# HELP tarn_inference_latency_p50_ms Inference latency p50 in milliseconds\n");
+            sb.append("# TYPE tarn_inference_latency_p50_ms gauge\n");
+            sb.append("# HELP tarn_inference_latency_p95_ms Inference latency p95 in milliseconds\n");
+            sb.append("# TYPE tarn_inference_latency_p95_ms gauge\n");
+            sb.append("# HELP tarn_inference_latency_p99_ms Inference latency p99 in milliseconds\n");
+            sb.append("# TYPE tarn_inference_latency_p99_ms gauge\n");
+            for (String model : mc.getTrackedModels()) {
+                Map<String, Double> percentiles = mc.getLatencyPercentiles(model);
+                sb.append("tarn_inference_latency_p50_ms{model=\"").append(model).append("\"} ").append(percentiles.get("p50")).append("\n");
+                sb.append("tarn_inference_latency_p95_ms{model=\"").append(model).append("\"} ").append(percentiles.get("p95")).append("\n");
+                sb.append("tarn_inference_latency_p99_ms{model=\"").append(model).append("\"} ").append(percentiles.get("p99")).append("\n");
+            }
+
+            // Error rates per model
+            sb.append("\n# HELP tarn_model_error_rate Error rate per model (0.0 to 1.0)\n");
+            sb.append("# TYPE tarn_model_error_rate gauge\n");
+            for (Map.Entry<String, Double> entry : mc.getAllErrorRates().entrySet()) {
+                sb.append("tarn_model_error_rate{model=\"").append(entry.getKey()).append("\"} ").append(entry.getValue()).append("\n");
             }
 
             String response = sb.toString();
@@ -317,9 +358,27 @@ public class DiscoveryServer {
             boolean atLeastOneReady = false;
             synchronized (containers) {
                 for (Container c : containers) {
-                    if (am.getMetricsCollector().isContainerReady(c.getNodeId().getHost(), config.tritonPort)) {
-                        atLeastOneReady = true;
-                        break;
+                    String host = c.getNodeId().getHost();
+                    CircuitBreaker cb = healthCheckCircuitBreakers.computeIfAbsent(
+                            host, k -> CircuitBreaker.forHealthCheck(k));
+                    
+                    if (!cb.allowRequest()) {
+                        log.debug("Circuit breaker OPEN for host {}, skipping health check", host);
+                        continue;
+                    }
+                    
+                    try {
+                        boolean ready = am.getMetricsCollector().isContainerReady(host, config.tritonPort);
+                        if (ready) {
+                            cb.onSuccess();
+                            atLeastOneReady = true;
+                            break;
+                        } else {
+                            cb.onFailure();
+                        }
+                    } catch (Exception e) {
+                        cb.onFailure();
+                        log.warn("Health check failed for host {}: {}", host, e.getMessage());
                     }
                 }
             }
@@ -407,6 +466,50 @@ public class DiscoveryServer {
 
             String response = String.valueOf(allowed);
             exchange.getResponseHeaders().set("Content-Type", "text/plain");
+            exchange.sendResponseHeaders(200, response.length());
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write(response.getBytes());
+            }
+        }
+    }
+
+    private class AlertsHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!isAuthorized(exchange)) return;
+
+            MetricsCollector mc = am.getMetricsCollector();
+            List<MetricsCollector.AlertEvent> alerts = mc.getRecentAlerts();
+
+            StringBuilder sb = new StringBuilder();
+            sb.append("# HELP tarn_alerts_total Total number of alerts\n");
+            sb.append("# TYPE tarn_alerts_total counter\n");
+            sb.append("tarn_alerts_total ").append(alerts.size()).append("\n\n");
+
+            sb.append("# Recent alerts (last 100)\n");
+            for (MetricsCollector.AlertEvent alert : alerts) {
+                sb.append("# [").append(alert.timestamp).append("] ")
+                        .append(alert.severity.toUpperCase()).append(" - ")
+                        .append(alert.alertType).append(": ")
+                        .append(alert.message).append("\n");
+            }
+
+            // Prometheus-style alert metrics
+            long containerFailures = alerts.stream()
+                    .filter(a -> "container_failure".equals(a.alertType)).count();
+            long scalingEvents = alerts.stream()
+                    .filter(a -> "scaling_event".equals(a.alertType)).count();
+
+            sb.append("\n# HELP tarn_container_failures_total Total container failures\n");
+            sb.append("# TYPE tarn_container_failures_total counter\n");
+            sb.append("tarn_container_failures_total ").append(containerFailures).append("\n");
+
+            sb.append("# HELP tarn_scaling_events_total Total scaling events\n");
+            sb.append("# TYPE tarn_scaling_events_total counter\n");
+            sb.append("tarn_scaling_events_total ").append(scalingEvents).append("\n");
+
+            String response = sb.toString();
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
             exchange.sendResponseHeaders(200, response.length());
             try (OutputStream os = exchange.getResponseBody()) {
                 os.write(response.getBytes());

@@ -70,6 +70,7 @@ public class ApplicationMaster {
     private RangerAuthorizer rangerAuthorizer;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
+    private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
 
     public ApplicationMaster() {
         this.conf = new YarnConfiguration();
@@ -235,9 +236,11 @@ public class ApplicationMaster {
 
         if (newTarget > currentTarget) {
             targetNumContainers.set(newTarget);
+            metricsCollector.recordScalingEvent("scale_up", currentTarget, newTarget);
             requestContainers();
         } else if (newTarget < currentTarget) {
             targetNumContainers.set(newTarget);
+            metricsCollector.recordScalingEvent("scale_down", currentTarget, newTarget);
             stopExtraContainer();
         }
     }
@@ -275,15 +278,21 @@ public class ApplicationMaster {
         String data = host + ":" + config.tritonPort;
 
         try {
-            if (zkClient.checkExists().forPath(path) != null) {
-                zkClient.delete().forPath(path);
-            }
-            zkClient.create()
-                    .withMode(CreateMode.EPHEMERAL)
-                    .forPath(path, data.getBytes());
+            zkRetryPolicy.executeVoid(() -> {
+                try {
+                    if (zkClient.checkExists().forPath(path) != null) {
+                        zkClient.delete().forPath(path);
+                    }
+                    zkClient.create()
+                            .withMode(CreateMode.EPHEMERAL)
+                            .forPath(path, data.getBytes());
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }, "registerInZooKeeper:" + containerId);
             log.info("Registered container {} in ZooKeeper at {}: {}", containerId, path, data);
         } catch (Exception e) {
-            log.error("Failed to register container {} in ZooKeeper", containerId, e);
+            log.error("Failed to register container {} in ZooKeeper after retries", containerId, e);
         }
     }
 
@@ -292,12 +301,18 @@ public class ApplicationMaster {
 
         String path = config.zkPath + "/" + containerId.toString();
         try {
-            if (zkClient.checkExists().forPath(path) != null) {
-                zkClient.delete().forPath(path);
-                log.info("Unregistered container {} from ZooKeeper at {}", containerId, path);
-            }
+            zkRetryPolicy.executeVoid(() -> {
+                try {
+                    if (zkClient.checkExists().forPath(path) != null) {
+                        zkClient.delete().forPath(path);
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }, "unregisterFromZooKeeper:" + containerId);
+            log.info("Unregistered container {} from ZooKeeper at {}", containerId, path);
         } catch (Exception e) {
-            log.error("Failed to unregister container {} from ZooKeeper", containerId, e);
+            log.error("Failed to unregister container {} from ZooKeeper after retries", containerId, e);
         }
     }
 
@@ -413,6 +428,7 @@ public class ApplicationMaster {
                             " 1>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stdout" +
                             " 2>" + ApplicationConstants.LOG_DIR_EXPANSION_VAR + "/stderr"
             ));
+            metricsCollector.recordContainerStart(container.getId().toString());
             nmClient.startContainerAsync(container, ctx);
         }
 
@@ -421,6 +437,10 @@ public class ApplicationMaster {
             for (ContainerStatus status : statuses) {
                 log.info("Container completed: {}. State: {}. Exit Status: {}. Diagnostics: {}",
                         status.getContainerId(), status.getState(), status.getExitStatus(), status.getDiagnostics());
+                if (status.getExitStatus() != 0) {
+                    metricsCollector.recordContainerFailure(status.getContainerId().toString(), 
+                            "Exit status: " + status.getExitStatus() + ", " + status.getDiagnostics());
+                }
                 runningContainers.removeIf(c -> c.getId().equals(status.getContainerId()));
                 unregisterFromZooKeeper(status.getContainerId());
             }
@@ -455,6 +475,7 @@ public class ApplicationMaster {
         @Override
         public void onContainerStarted(ContainerId containerId, Map<String, ByteBuffer> allServiceKeys) {
             log.info("Container started: {}", containerId);
+            metricsCollector.recordContainerReady(containerId.toString());
         }
 
         @Override
@@ -471,6 +492,7 @@ public class ApplicationMaster {
         @Override
         public void onStartContainerError(ContainerId containerId, Throwable t) {
             log.error("Start error for {}", containerId, t);
+            metricsCollector.recordContainerFailure(containerId.toString(), "Start error: " + t.getMessage());
             unregisterFromZooKeeper(containerId);
         }
 

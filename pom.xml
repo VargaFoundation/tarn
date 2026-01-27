@@ -19,6 +19,7 @@
 		<hadoop.version>3.3.6</hadoop.version>
         <junit.version>5.10.1</junit.version>
         <mockito.version>5.7.0</mockito.version>
+        <enforce.build>false</enforce.build>
     </properties>
 	<dependencies>
 		<dependency>
@@ -56,9 +57,14 @@
 			<version>1.7.36</version>
 		</dependency>
 		<dependency>
-			<groupId>com.sun.net.httpserver</groupId>
-			<artifactId>http</artifactId>
-			<version>20070405</version>
+			<groupId>org.eclipse.jetty</groupId>
+			<artifactId>jetty-server</artifactId>
+			<version>11.0.18</version>
+		</dependency>
+		<dependency>
+			<groupId>org.eclipse.jetty</groupId>
+			<artifactId>jetty-servlet</artifactId>
+			<version>11.0.18</version>
 		</dependency>
 		<dependency>
 			<groupId>org.projectlombok</groupId>
@@ -176,7 +182,7 @@
                         <goals>
                             <goal>aggregate-add-third-party</goal>
                         </goals>
-                        <phase>dont-execute</phase>
+                        <phase>none</phase>
                         <configuration>
                             <fileTemplate>./third-party-file.ftl</fileTemplate>
                             <includeTransitiveDependencies>true</includeTransitiveDependencies>
@@ -280,7 +286,7 @@
                         <goals>
                             <goal>update-file-header</goal>
                         </goals>
-                        <phase>dont-execute</phase>
+                        <phase>none</phase>
                         <configuration>
                             <licenseName>apache_v2</licenseName>
                             <organizationName>Varga Foundation</organizationName>
