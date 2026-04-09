@@ -54,6 +54,9 @@ public class TarnConfig {
     public boolean rangerAudit;
     public Map<String, String> customEnv = new HashMap<>();
 
+    // Client daemon port (health endpoint when running as foreground monitor)
+    public int clientPort;
+
     // Scaling properties
     public double scaleUpThreshold;
     public double scaleDownThreshold;
@@ -87,6 +90,7 @@ public class TarnConfig {
         rangerService = getEnv("RANGER_SERVICE", null);
         rangerAppId = getEnv("RANGER_APP_ID", "tarn");
         rangerAudit = Boolean.parseBoolean(getEnv("RANGER_AUDIT", "true"));
+        clientPort = Integer.parseInt(getEnv("CLIENT_PORT", "8889"));
 
         scaleUpThreshold = Double.parseDouble(getEnv("SCALE_UP_THRESHOLD", "0.7"));
         scaleDownThreshold = Double.parseDouble(getEnv("SCALE_DOWN_THRESHOLD", "0.2"));
@@ -143,6 +147,7 @@ public class TarnConfig {
         if (line.hasOption("min-instances")) minContainers = Integer.parseInt(line.getOptionValue("min-instances"));
         if (line.hasOption("max-instances")) maxContainers = Integer.parseInt(line.getOptionValue("max-instances"));
         if (line.hasOption("cooldown")) scaleCooldownMs = Long.parseLong(line.getOptionValue("cooldown"));
+        if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
     }
 
     public static Options getOptions() {
@@ -180,6 +185,7 @@ public class TarnConfig {
         options.addOption("min", "min-instances", true, "Minimum number of instances");
         options.addOption("max", "max-instances", true, "Maximum number of instances");
         options.addOption("c", "cooldown", true, "Scale cooldown in ms");
+        options.addOption("cp", "client-port", true, "Client health endpoint port (default: 8889)");
         return options;
     }
 }

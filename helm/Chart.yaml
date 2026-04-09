@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tarn
+description: Helm chart pour deployer Tarn - Triton on YARN orchestrator
+type: application
+version: 1.0.0
+appVersion: "0.0.1-SNAPSHOT"

@@ -1,0 +1,6 @@
+target/
+.git/
+.github/
+.idea/
+helm/
+*.md

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tarn.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tarn.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "tarn.selectorLabels" . | nindent 4 }}

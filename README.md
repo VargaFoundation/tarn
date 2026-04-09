@@ -226,7 +226,74 @@ To run tests using the distribution-specific dependencies:
 mvn test -Dhadoop.version=3.3.6.1.2.4.0-32
 ```
 
-## Deployment
+## Docker
+
+Build and run the Docker image:
+
+```bash
+docker build -t tarn:latest .
+docker run tarn:latest
+```
+
+The image is automatically built and pushed to GitHub Container Registry via GitHub Actions on every push to `main`:
+
+```bash
+docker pull ghcr.io/varga-foundation/tarn:latest
+```
+
+## Deployment on Kubernetes (Helm)
+
+Tarn is available as a Helm chart on GitHub Container Registry (OCI).
+
+### Install from the OCI registry
+
+```bash
+helm install tarn oci://ghcr.io/varga-foundation/charts/tarn --version 1.0.0 \
+  --namespace tarn --create-namespace \
+  --set config.yarnResourceManagerAddress=rm:8032 \
+  --set config.zookeeperQuorum=zk1:2181
+```
+
+### Install from local sources
+
+```bash
+helm install tarn ./helm -n tarn --create-namespace
+```
+
+### Configuration
+
+Override values at install time or create a `values.override.yaml`:
+
+```yaml
+config:
+  hadoopConfDir: "/etc/hadoop/conf"
+  yarnResourceManagerAddress: "rm:8032"
+  zookeeperQuorum: "zk1:2181,zk2:2181,zk3:2181"
+  tritonDockerImage: "nvcr.io/nvidia/tritonserver:24.09-py3"
+  modelStoragePath: "hdfs:///models"
+```
+
+```bash
+helm install tarn oci://ghcr.io/varga-foundation/charts/tarn --version 1.0.0 \
+  -f values.override.yaml -n tarn --create-namespace
+```
+
+### Uninstall
+
+```bash
+helm uninstall tarn -n tarn
+```
+
+## CI/CD
+
+GitHub Actions automatically:
+1. Builds the Maven project and runs tests.
+2. Builds and pushes the Docker image to `ghcr.io/varga-foundation/tarn`.
+3. Packages and pushes the Helm chart to `oci://ghcr.io/varga-foundation/charts/tarn`.
+
+Triggers: push/PR to `main`/`master`, or manual dispatch.
+
+## Deployment on YARN
 
 To submit the application to YARN:
 

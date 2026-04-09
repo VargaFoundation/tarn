@@ -1,0 +1,44 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/varga-foundation/tarn
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8088
+
+resources:
+  limits:
+    memory: "1Gi"
+    cpu: "1000m"
+  requests:
+    memory: "512Mi"
+    cpu: "500m"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+config:
+  # Hadoop / YARN
+  hadoopConfDir: "/etc/hadoop/conf"
+  yarnResourceManagerAddress: "localhost:8032"
+  # ZooKeeper
+  zookeeperQuorum: "localhost:2181"
+  # Triton
+  tritonDockerImage: "nvcr.io/nvidia/tritonserver:latest"
+  # Model storage
+  modelStoragePath: "hdfs:///models"
+
+volumes: []
+volumeMounts: []

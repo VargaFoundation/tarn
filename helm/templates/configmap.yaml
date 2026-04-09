@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tarn.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tarn.labels" . | nindent 4 }}
+data:
+  HADOOP_CONF_DIR: {{ .Values.config.hadoopConfDir | quote }}
+  YARN_RESOURCEMANAGER_ADDRESS: {{ .Values.config.yarnResourceManagerAddress | quote }}
+  ZOOKEEPER_QUORUM: {{ .Values.config.zookeeperQuorum | quote }}
+  TRITON_DOCKER_IMAGE: {{ .Values.config.tritonDockerImage | quote }}
+  MODEL_STORAGE_PATH: {{ .Values.config.modelStoragePath | quote }}

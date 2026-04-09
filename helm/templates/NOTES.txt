@@ -1,0 +1,10 @@
+Tarn a ete deploye avec succes !
+
+1. Verifier le statut des pods :
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "tarn.name" . }}
+
+2. Acceder au service :
+   kubectl port-forward svc/{{ include "tarn.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+
+Assurez-vous que la configuration Hadoop (core-site.xml, yarn-site.xml) est accessible au pod
+via un volume mount ou un ConfigMap.

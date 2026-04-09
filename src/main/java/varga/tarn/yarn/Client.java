@@ -9,9 +9,9 @@ package varga.tarn.yarn;
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,6 +21,8 @@ package varga.tarn.yarn;
  */
 
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.ParseException;
 import org.apache.hadoop.conf.Configuration;
@@ -37,12 +39,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * YARN Client for submitting the Triton application.
+ * YARN Client for submitting and monitoring the Triton application.
+ * <p>
+ * Runs as a long-lived daemon: submits the YARN application, exposes a health
+ * endpoint on {@code --client-port}, and monitors the application until it
+ * terminates. On SIGTERM the client kills the YARN application via a shutdown
+ * hook, making it suitable for Ambari PID-based lifecycle management.
  */
 public class Client {
 
@@ -50,6 +59,10 @@ public class Client {
 
     private Configuration conf;
     private YarnClient yarnClient;
+    private volatile ApplicationId appId;
+    private volatile YarnApplicationState lastKnownState = YarnApplicationState.NEW;
+    private volatile String amHost = "";
+    private volatile String trackingUrl = "";
 
     public Client() {
         conf = new YarnConfiguration();
@@ -81,7 +94,7 @@ public class Client {
 
         YarnClientApplication app = yarnClient.createApplication();
         ApplicationSubmissionContext appContext = app.getApplicationSubmissionContext();
-        ApplicationId appId = appContext.getApplicationId();
+        appId = appContext.getApplicationId();
 
         appContext.setApplicationName("Triton-on-YARN");
         appContext.setApplicationTags(Collections.singleton("TARN"));
@@ -213,6 +226,75 @@ public class Client {
 
         log.info("Submitting application {} to ResourceManager", appId);
         yarnClient.submitApplication(appContext);
+        log.info("Application {} submitted successfully", appId);
+
+        // Register shutdown hook to kill YARN app when this process is terminated
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            log.info("Shutdown hook: killing YARN application {}", appId);
+            try {
+                yarnClient.killApplication(appId);
+                log.info("YARN application {} killed", appId);
+            } catch (Exception e) {
+                log.warn("Failed to kill YARN application on shutdown: {}", e.getMessage());
+            }
+        }));
+
+        // Start health HTTP server for Ambari status checks
+        HttpServer healthServer = HttpServer.create(new InetSocketAddress(config.clientPort), 0);
+        healthServer.createContext("/health", this::handleHealth);
+        healthServer.setExecutor(null);
+        healthServer.start();
+        log.info("Client health endpoint started on port {}", config.clientPort);
+
+        // Monitor loop - blocks until application terminates
+        try {
+            monitorApplication();
+        } finally {
+            healthServer.stop(0);
+            yarnClient.stop();
+        }
+    }
+
+    private void monitorApplication() throws Exception {
+        while (!Thread.currentThread().isInterrupted()) {
+            Thread.sleep(10000);
+
+            ApplicationReport report = yarnClient.getApplicationReport(appId);
+            lastKnownState = report.getYarnApplicationState();
+            amHost = report.getHost() != null ? report.getHost() : "";
+            trackingUrl = report.getTrackingUrl() != null ? report.getTrackingUrl() : "";
+
+            switch (lastKnownState) {
+                case RUNNING:
+                    log.info("Application {} RUNNING - AM at {}, tracking: {}",
+                            appId, amHost, trackingUrl);
+                    break;
+                case FINISHED:
+                case KILLED:
+                case FAILED:
+                    log.info("Application {} terminated: {} (final: {})",
+                            appId, lastKnownState, report.getFinalApplicationStatus());
+                    return;
+                default:
+                    log.info("Application {} state: {}", appId, lastKnownState);
+                    break;
+            }
+        }
+    }
+
+    private void handleHealth(HttpExchange exchange) throws IOException {
+        String state = lastKnownState.toString();
+        String json = String.format(
+                "{\"applicationId\":\"%s\",\"state\":\"%s\",\"amHost\":\"%s\",\"trackingUrl\":\"%s\"}",
+                appId != null ? appId : "unknown", state, amHost, trackingUrl);
+
+        int code = (lastKnownState == YarnApplicationState.RUNNING) ? 200 : 503;
+        byte[] bytes = json.getBytes();
+        exchange.getResponseHeaders().set("Content-Type", "application/json");
+        exchange.sendResponseHeaders(code, bytes.length);
+        try (OutputStream os = exchange.getResponseBody()) {
+            os.write(bytes);
+        }
     }
 
     private void setupAppJar(Path jarPath, Map<String, LocalResource> localResources, ApplicationId appId) throws IOException {
