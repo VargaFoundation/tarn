@@ -81,11 +81,19 @@
                 <h2 class="text-xl font-semibold mb-4 text-dark-accent">Available Models (HDFS)</h2>
                 <div class="flex flex-wrap gap-2">
                     <#list availableModels as model>
-                        <span class="bg-dark-border px-3 py-1 rounded-full text-sm">${model}</span>
+                        <span class="bg-dark-border px-3 py-1 rounded-full text-sm" title="Base model">${model}</span>
+                        <#if (loraAdapters?? && loraAdapters[model]??)>
+                            <#list loraAdapters[model] as lora>
+                                <span class="bg-purple-900 text-purple-200 px-3 py-1 rounded-full text-xs" title="LoRA adapter on ${model}">${model}#${lora}</span>
+                            </#list>
+                        </#if>
                     <#else>
                         <span class="text-gray-500 italic">No models found on HDFS</span>
                     </#list>
                 </div>
+                <#if (loraAdapters?? && loraAdapters?size > 0)>
+                    <p class="text-xs text-gray-500 mt-3">Use <code class="bg-dark-border px-1 rounded">base#lora</code> as the OpenAI <code class="bg-dark-border px-1 rounded">model</code> parameter.</p>
+                </#if>
             </div>
         </section>
 

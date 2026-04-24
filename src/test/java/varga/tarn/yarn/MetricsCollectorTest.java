@@ -89,4 +89,59 @@ public class MetricsCollectorTest {
         assertEquals("[]", collector.fetchLoadedModels("localhost", 8000));
         assertEquals(false, collector.isContainerReady("169.254.169.254", 8000));
     }
+
+    @Test
+    public void testParseQueueDepthSumsAcrossModels() {
+        MetricsCollector c = new MetricsCollector(8002);
+        String metrics = "# HELP nv_inference_pending_request_count Pending\n" +
+                "# TYPE nv_inference_pending_request_count gauge\n" +
+                "nv_inference_pending_request_count{model=\"llama-3-70b\",version=\"1\"} 12\n" +
+                "nv_inference_pending_request_count{model=\"stable-diffusion\",version=\"1\"} 3\n" +
+                "nv_inference_pending_request_count{model=\"resnet50\",version=\"1\"} 0\n";
+        assertEquals(15, c.parseQueueDepthFromMetrics(metrics));
+    }
+
+    @Test
+    public void testParseQueueDepthEmpty() {
+        MetricsCollector c = new MetricsCollector(8002);
+        assertEquals(0, c.parseQueueDepthFromMetrics(""));
+        assertEquals(0, c.parseQueueDepthFromMetrics(null));
+        assertEquals(0, c.parseQueueDepthFromMetrics("nv_gpu_utilization{gpu=\"0\"} 10"));
+    }
+
+    /**
+     * Cumulative histogram buckets must include every sample whose value is <= the boundary.
+     * This is the Prometheus contract — a regression here would break histogram_quantile().
+     */
+    @Test
+    public void testHistogramBucketsAreCumulative() {
+        MetricsCollector collector = new MetricsCollector(8002);
+        // latencies in ms: 5, 50, 120, 800, 4500 -> seconds: 0.005, 0.05, 0.12, 0.8, 4.5
+        collector.recordInferenceLatency("m", 5.0);
+        collector.recordInferenceLatency("m", 50.0);
+        collector.recordInferenceLatency("m", 120.0);
+        collector.recordInferenceLatency("m", 800.0);
+        collector.recordInferenceLatency("m", 4500.0);
+
+        long[] buckets = collector.getHistogramBucketsCumulative("m");
+        assertEquals(MetricsCollector.LATENCY_BUCKETS_SECONDS.length, buckets.length);
+
+        // le=0.005 covers only the 5ms sample
+        assertEquals(1L, buckets[0]);
+        // le=0.05 covers 5ms + 50ms => 2
+        assertEquals(2L, buckets[3]);
+        // le=0.25 covers 5, 50, 120 ms => 3
+        int idx025 = java.util.Arrays.binarySearch(MetricsCollector.LATENCY_BUCKETS_SECONDS, 0.25);
+        assertEquals(3L, buckets[idx025]);
+        // le=1.0 covers 5, 50, 120, 800 ms => 4
+        int idx1 = java.util.Arrays.binarySearch(MetricsCollector.LATENCY_BUCKETS_SECONDS, 1.0);
+        assertEquals(4L, buckets[idx1]);
+        // le=5.0 covers all 5 samples
+        int idx5 = java.util.Arrays.binarySearch(MetricsCollector.LATENCY_BUCKETS_SECONDS, 5.0);
+        assertEquals(5L, buckets[idx5]);
+
+        assertEquals(5L, collector.getHistogramCount("m"));
+        // Sum is in seconds: 0.005 + 0.05 + 0.12 + 0.8 + 4.5 = 5.475
+        assertEquals(5.475, collector.getHistogramSum("m"), 1e-9);
+    }
 }

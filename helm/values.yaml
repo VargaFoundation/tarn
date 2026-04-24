@@ -12,10 +12,15 @@ fullnameOverride: ""
 serviceAccount:
   create: true
   name: ""
+  annotations: {}
 
+# Admin port (discovery, dashboard, metrics, authorize, health).
 service:
   type: ClusterIP
   port: 8088
+  # OpenAI-compatible proxy port. Exposed separately so Ingress/Knox can route inference
+  # traffic on a distinct path and have different SLOs than the admin surface.
+  openaiPort: 9000
 
 resources:
   limits:
@@ -27,7 +32,81 @@ resources:
 
 nodeSelector: {}
 tolerations: []
-affinity: {}
+# For HA: default to soft pod anti-affinity so replicas spread across nodes when possible
+# without blocking scheduling on small clusters.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: tarn
+
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# When true, a NetworkPolicy is created restricting ingress to the namespace matchLabels.
+networkPolicy:
+  enabled: false
+  ingressNamespaceSelector: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # Hostnames pointing at the admin port and (optionally) the OpenAI proxy port.
+  hosts:
+    - host: tarn.example.local
+      paths:
+        - path: /
+          pathType: Prefix
+          servicePort: http
+  tls: []
+
+# Prometheus Operator ServiceMonitor for scraping /metrics on the admin port.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  # If your /metrics endpoint requires the X-TARN-Token, set it via a label and add a
+  # scrape auth config at the Operator level.
+  honorLabels: true
+
+# Pod security context — default to non-root, read-only FS.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10000
+  fsGroup: 10000
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# Liveness hits /health/live (or /health as fallback). Readiness waits for at least one
+# Triton backend to be ready, aligning with AM's /health return codes.
+probes:
+  liveness:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 20
+    periodSeconds: 15
+    failureThreshold: 6
+  readiness:
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    failureThreshold: 3
 
 config:
   # Hadoop / YARN
@@ -39,6 +118,23 @@ config:
   tritonDockerImage: "nvcr.io/nvidia/tritonserver:latest"
   # Model storage
   modelStoragePath: "hdfs:///models"
+  # TLS (optional)
+  tlsEnabled: false
+  tlsKeystorePath: ""
+  # OpenAI proxy
+  openaiProxyEnabled: false
+  # OpenTelemetry endpoint (consumed by Java agent if attached; see extraJavaOpts).
+  otelEndpoint: ""
+  # Scaling
+  scaleMode: "composite"
+  # Ranger strict mode (denies by default when plugin init fails).
+  rangerStrict: true
+  # ZK required (AM refuses to start if ZK is unreachable).
+  zkRequired: true
+
+# Extra Java system properties, mostly for the OpenTelemetry agent:
+#   -javaagent:/opt/otel/opentelemetry-javaagent.jar
+extraJavaOpts: ""
 
 volumes: []
 volumeMounts: []

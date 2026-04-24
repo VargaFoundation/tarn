@@ -32,6 +32,7 @@ public class ScalingPolicy {
     private final int maxContainers;
     private final int minContainers;
     private final long cooldownMs;
+    private final LoadSignal.ScalingMode mode;
     private long lastScaleTime = 0;
 
     public ScalingPolicy() {
@@ -39,25 +40,49 @@ public class ScalingPolicy {
     }
 
     public ScalingPolicy(double upThreshold, double downThreshold, int minContainers, int maxContainers, long cooldownMs) {
+        this(upThreshold, downThreshold, minContainers, maxContainers, cooldownMs, LoadSignal.ScalingMode.COMPOSITE);
+    }
+
+    public ScalingPolicy(double upThreshold, double downThreshold, int minContainers, int maxContainers,
+                         long cooldownMs, LoadSignal.ScalingMode mode) {
         this.upThreshold = upThreshold;
         this.downThreshold = downThreshold;
         this.minContainers = minContainers;
         this.maxContainers = maxContainers;
         this.cooldownMs = cooldownMs;
+        this.mode = mode == null ? LoadSignal.ScalingMode.COMPOSITE : mode;
     }
 
+    public LoadSignal.ScalingMode getMode() {
+        return mode;
+    }
+
+    /**
+     * Legacy scalar entry point preserved so pre-P1.5 callers and ScalingPolicyTest continue
+     * to function. Treats the scalar as the normalized load regardless of mode.
+     */
     public int calculateTarget(int currentTarget, double avgLoad) {
+        return decide(currentTarget, avgLoad, "load=" + String.format("%.2f", avgLoad));
+    }
+
+    /** Preferred entry point: a composite signal + mode-aware normalization. */
+    public int calculateTarget(int currentTarget, LoadSignal signal) {
+        double load = signal.normalizedLoad(mode);
+        return decide(currentTarget, load, "mode=" + mode + " " + signal + " -> load=" + String.format("%.2f", load));
+    }
+
+    private int decide(int currentTarget, double load, String context) {
         long now = System.currentTimeMillis();
         if (now - lastScaleTime < cooldownMs) {
             return currentTarget;
         }
 
         int newTarget = currentTarget;
-        if (avgLoad > upThreshold && currentTarget < maxContainers) {
-            log.info("High load detected ({}), scaling up...", String.format("%.2f", avgLoad));
+        if (load > upThreshold && currentTarget < maxContainers) {
+            log.info("Scaling up (ctx: {})", context);
             newTarget = currentTarget + 1;
-        } else if (avgLoad < downThreshold && currentTarget > minContainers) {
-            log.info("Low load detected ({}), scaling down...", String.format("%.2f", avgLoad));
+        } else if (load < downThreshold && currentTarget > minContainers) {
+            log.info("Scaling down (ctx: {})", context);
             newTarget = currentTarget - 1;
         }
 

@@ -12,5 +12,11 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    {{- if .Values.config.openaiProxyEnabled }}
+    - port: {{ .Values.service.openaiPort }}
+      targetPort: openai
+      protocol: TCP
+      name: openai
+    {{- end }}
   selector:
     {{- include "tarn.selectorLabels" . | nindent 4 }}

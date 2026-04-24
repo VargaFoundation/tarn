@@ -92,6 +92,18 @@
 			<artifactId>curator-recipes</artifactId>
 			<version>5.5.0</version>
 		</dependency>
+		<!-- Keep databind + core pinned together. Hadoop 3.3.6 pulls 2.12 transitively; 2.15.2
+		     introduces StreamConstraintsException which is missing in 2.12, so we pin both. -->
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-core</artifactId>
+			<version>2.15.2</version>
+		</dependency>
+		<dependency>
+			<groupId>com.fasterxml.jackson.core</groupId>
+			<artifactId>jackson-annotations</artifactId>
+			<version>2.15.2</version>
+		</dependency>
 		<dependency>
 			<groupId>com.fasterxml.jackson.core</groupId>
 			<artifactId>jackson-databind</artifactId>
@@ -107,6 +119,19 @@
 					<artifactId>*</artifactId>
 				</exclusion>
 			</exclusions>
+		</dependency>
+		<!-- OpenTelemetry API only. SDK and exporters are injected via the otel Java agent
+		     at runtime (operators who want traces attach -javaagent:opentelemetry-javaagent.jar).
+		     This keeps the uber-JAR small and lets them pick their own exporter version. -->
+		<dependency>
+			<groupId>io.opentelemetry</groupId>
+			<artifactId>opentelemetry-api</artifactId>
+			<version>1.40.0</version>
+		</dependency>
+		<dependency>
+			<groupId>io.opentelemetry</groupId>
+			<artifactId>opentelemetry-context</artifactId>
+			<version>1.40.0</version>
 		</dependency>
 
 		<dependency>
@@ -242,7 +267,24 @@
 								<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
 									<mainClass>varga.tarn.yarn.Client</mainClass>
 								</transformer>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
 							</transformers>
+							<!-- Relocate dependencies that YARN already provides at its own version,
+							     so our code binds to the version we shipped. Without this, TARN breaks
+							     whenever the cluster ships an older Jackson / Curator / OTel. -->
+							<relocations>
+								<relocation>
+									<pattern>com.fasterxml.jackson</pattern>
+									<shadedPattern>varga.tarn.shaded.jackson</shadedPattern>
+								</relocation>
+								<relocation>
+									<pattern>org.apache.curator</pattern>
+									<shadedPattern>varga.tarn.shaded.curator</shadedPattern>
+								</relocation>
+								<!-- OpenTelemetry is intentionally NOT relocated: the opentelemetry-javaagent
+								     hooks classes under io.opentelemetry.api.* by their canonical package. If we
+								     shade it, spans silently drop. -->
+							</relocations>
 						</configuration>
 					</execution>
 				</executions>

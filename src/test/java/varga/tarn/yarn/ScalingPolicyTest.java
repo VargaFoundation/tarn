@@ -54,4 +54,31 @@ public class ScalingPolicyTest {
         assertEquals(2, policy.calculateTarget(1, 0.8)); // Scales up
         assertEquals(2, policy.calculateTarget(2, 0.8)); // Cooldown active
     }
+
+    @Test
+    public void testQueueDepthModeIgnoresGpu() {
+        // GPU pinned at 100% (LLM steady state) but queue short -> QUEUE_DEPTH mode must NOT scale.
+        ScalingPolicy policy = new ScalingPolicy(0.7, 0.2, 1, 10, 0,
+                LoadSignal.ScalingMode.QUEUE_DEPTH);
+        LoadSignal s = new LoadSignal(1.0, 4, 0.0, 2, 16); // per-container=2, load=0.125
+        assertEquals(1, policy.calculateTarget(1, s), "should not scale up on GPU alone in queue mode");
+    }
+
+    @Test
+    public void testQueueDepthModeScalesOnBacklog() {
+        ScalingPolicy policy = new ScalingPolicy(0.7, 0.2, 1, 10, 0,
+                LoadSignal.ScalingMode.QUEUE_DEPTH);
+        // 24 pending / 1 container / cap 16 -> load=1.5 clamped to 1.0 -> scale up
+        LoadSignal s = new LoadSignal(0.5, 24, 0.0, 1, 16);
+        assertEquals(2, policy.calculateTarget(1, s));
+    }
+
+    @Test
+    public void testCompositeTakesMax() {
+        ScalingPolicy policy = new ScalingPolicy(0.7, 0.2, 1, 10, 0,
+                LoadSignal.ScalingMode.COMPOSITE);
+        // GPU low, queue high -> composite = queue normalized
+        LoadSignal s = new LoadSignal(0.1, 40, 0.0, 2, 16); // queue per=20, norm=1.0
+        assertEquals(2, policy.calculateTarget(1, s));
+    }
 }

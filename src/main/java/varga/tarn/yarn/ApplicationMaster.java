@@ -22,6 +22,8 @@ package varga.tarn.yarn;
 
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.framework.recipes.cache.NodeCache;
+import org.apache.curator.framework.recipes.cache.NodeCacheListener;
 import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.framework.state.ConnectionStateListener;
 import org.apache.curator.retry.ExponentialBackoffRetry;
@@ -42,6 +44,7 @@ import org.apache.hadoop.yarn.util.Records;
 import org.apache.zookeeper.CreateMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import varga.tarn.yarn.openai.OpenAIProxyServer;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -76,11 +79,14 @@ public class ApplicationMaster {
     private NMClientAsync nmClient;
     private DiscoveryServer discoveryServer;
     private RangerAuthorizer rangerAuthorizer;
+    private QuotaEnforcer quotaEnforcer;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
     private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
     private ScheduledExecutorService monitorExecutor;
     private ScheduledExecutorService drainExecutor;
+    private OpenAIProxyServer openaiProxy;
+    private NodeCache quotasNodeCache;
     // Timeout used when blocking on ZK connect at startup.
     private static final int ZK_CONNECT_TIMEOUT_SECONDS = 30;
 
@@ -97,7 +103,8 @@ public class ApplicationMaster {
                 config.scaleDownThreshold,
                 config.minContainers,
                 config.maxContainers,
-                config.scaleCooldownMs
+                config.scaleCooldownMs,
+                LoadSignal.ScalingMode.parse(config.scaleMode)
         );
         this.targetNumContainers.set(config.minContainers);
     }
@@ -105,10 +112,17 @@ public class ApplicationMaster {
     public void run() throws Exception {
         log.info("Starting ApplicationMaster...");
 
-        discoveryServer = new DiscoveryServer(config, this);
+        discoveryServer = new DiscoveryServer(config, this, conf);
         discoveryServer.start();
 
+        if (config.openaiProxyEnabled) {
+            openaiProxy = new OpenAIProxyServer(config, this, conf);
+            openaiProxy.start();
+        }
+
         rangerAuthorizer = new RangerAuthorizer(config);
+        quotaEnforcer = new QuotaEnforcer();
+        loadQuotasFromConfig();
         if (rangerAuthorizer.isDegraded()) {
             String msg = "Ranger plugin requested (service=" + config.rangerService + ") but initialization failed";
             metricsCollector.recordAlert("ranger_degraded", msg,
@@ -219,6 +233,7 @@ public class ApplicationMaster {
                 zkClient.create().creatingParentsIfNeeded().forPath(config.zkPath);
             }
             log.info("ZooKeeper client initialized and base path ensured: {}", config.zkPath);
+            startConfigWatchers();
         } catch (Exception e) {
             metricsCollector.recordAlert("zk_init_failed",
                     "ZooKeeper initialization failed: " + e.getMessage(),
@@ -229,6 +244,57 @@ public class ApplicationMaster {
             }
             log.warn("ZooKeeper init failed; continuing without registration (Knox discovery will be broken)", e);
         }
+    }
+
+    /**
+     * Sets up Curator {@link NodeCache}s on config znodes so quota rules can be updated
+     * without restarting the AM. Today we watch {@code {zkPath}/config/quotas}; scaling
+     * thresholds can be added here in the same pattern.
+     *
+     * <p>Operators push an update with e.g.
+     * {@code zkCli.sh set /services/triton/config/quotas '{"rules":[...]}'} and all AM
+     * replicas react within the Curator event latency (typically &lt; 100ms).
+     */
+    private void startConfigWatchers() {
+        if (zkClient == null) return;
+        String configRoot = configRootPath();
+        try {
+            if (zkClient.checkExists().forPath(configRoot) == null) {
+                zkClient.create().creatingParentsIfNeeded().forPath(configRoot);
+            }
+            String quotasPath = configRoot + "/quotas";
+            if (zkClient.checkExists().forPath(quotasPath) == null) {
+                zkClient.create().forPath(quotasPath, new byte[0]);
+            }
+            quotasNodeCache = new NodeCache(zkClient, quotasPath);
+            quotasNodeCache.getListenable().addListener(new NodeCacheListener() {
+                @Override public void nodeChanged() {
+                    byte[] data = quotasNodeCache.getCurrentData() == null
+                            ? null : quotasNodeCache.getCurrentData().getData();
+                    if (data == null || data.length == 0) {
+                        log.info("ZK quotas znode cleared; reloading from disk if configured");
+                        loadQuotasFromConfig();
+                        return;
+                    }
+                    String json = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+                    log.info("ZK quotas znode updated ({} bytes), hot-reloading", data.length);
+                    quotaEnforcer.loadFromJson(json);
+                    metricsCollector.recordAlert("quota_reloaded",
+                            "Quota rules hot-reloaded from ZK (" + data.length + " bytes)", "info");
+                }
+            });
+            quotasNodeCache.start(true);
+            log.info("ZK config watcher started at {}", quotasPath);
+        } catch (Exception e) {
+            log.warn("Failed to install ZK config watchers: {}", e.getMessage());
+        }
+    }
+
+    private String configRootPath() {
+        // Sibling of the instances path: /services/triton/config alongside /services/triton/instances.
+        int lastSlash = config.zkPath.lastIndexOf('/');
+        String parent = lastSlash > 0 ? config.zkPath.substring(0, lastSlash) : "/services/triton";
+        return parent + "/config";
     }
 
     private ConnectionStateListener newConnectionStateListener() {
@@ -271,8 +337,14 @@ public class ApplicationMaster {
         if (discoveryServer != null) {
             discoveryServer.stop();
         }
+        if (openaiProxy != null) {
+            openaiProxy.stop();
+        }
         if (rangerAuthorizer != null) {
             rangerAuthorizer.stop();
+        }
+        if (quotasNodeCache != null) {
+            try { quotasNodeCache.close(); } catch (Exception ignore) {}
         }
         if (zkClient != null) {
             zkClient.close();
@@ -286,13 +358,30 @@ public class ApplicationMaster {
         if (needed > 0) {
             log.info("Requesting {} additional containers", needed);
             Resource capability = Resource.newInstance(config.containerMemory, config.containerVCores);
-            int numGpus = config.tensorParallelism * config.pipelineParallelism;
-            if (numGpus > 0) {
+
+            AcceleratorType accelerator = AcceleratorType.parse(config.acceleratorType);
+            if (accelerator.requiresAcceleratorResource()) {
+                int accelCount = Math.max(1, config.tensorParallelism * config.pipelineParallelism);
                 try {
-                    capability.setResourceValue("yarn.io/gpu", numGpus);
+                    capability.setResourceValue(accelerator.yarnResourceName(), accelCount);
+                    if (config.gpuSliceSize != null && !config.gpuSliceSize.isEmpty()) {
+                        log.info("Requesting {} x {} ({}) per container, slice profile '{}' "
+                                        + "(MIG partitioning must be enabled on NodeManagers for fractional scheduling)",
+                                accelCount, accelerator.yarnResourceName(), accelerator, config.gpuSliceSize);
+                    } else {
+                        log.info("Requesting {} x {} ({}) per container",
+                                accelCount, accelerator.yarnResourceName(), accelerator);
+                    }
                 } catch (NoSuchMethodError e) {
-                    log.warn("GPU resource request not supported by this YARN version");
+                    log.warn("Accelerator resource {} not supported by this YARN version",
+                            accelerator.yarnResourceName());
+                } catch (org.apache.hadoop.yarn.exceptions.ResourceNotFoundException e) {
+                    log.error("Accelerator resource {} is not declared in resource-types.xml — "
+                            + "scheduling will fail. Add it to the cluster config or set "
+                            + "--accelerator-type=cpu_only.", accelerator.yarnResourceName());
                 }
+            } else {
+                log.info("CPU-only mode: no accelerator resource requested");
             }
             Priority priority = Priority.newInstance(0);
 
@@ -320,9 +409,9 @@ public class ApplicationMaster {
             requestContainers();
         }
 
-        // 2. Handle auto-scaling
-        double avgLoad = getAverageLoad();
-        int newTarget = scalingPolicy.calculateTarget(currentTarget, avgLoad);
+        // 2. Build a composite load signal (GPU + queue depth) in parallel across containers.
+        LoadSignal signal = buildLoadSignal(currentCount);
+        int newTarget = scalingPolicy.calculateTarget(currentTarget, signal);
 
         if (newTarget > currentTarget) {
             targetNumContainers.set(newTarget);
@@ -333,6 +422,56 @@ public class ApplicationMaster {
             metricsCollector.recordScalingEvent("scale_down", currentTarget, newTarget);
             stopExtraContainer();
         }
+    }
+
+    /**
+     * Parallel scrape of GPU utilization and pending queue depth across all running
+     * containers. Aggregates into a {@link LoadSignal} for {@link ScalingPolicy}. A per-host
+     * failure never stalls the whole decision — stale data is better than no decision.
+     */
+    private LoadSignal buildLoadSignal(int numContainers) {
+        List<Container> snapshot;
+        synchronized (runningContainers) {
+            snapshot = new ArrayList<>(runningContainers);
+        }
+        if (snapshot.isEmpty()) {
+            return new LoadSignal(0.0, 0, 0.0, 0, config.queueCapacityPerContainer);
+        }
+
+        List<CompletableFuture<double[]>> futures = new ArrayList<>(snapshot.size());
+        for (Container c : snapshot) {
+            String host = c.getNodeId().getHost();
+            String cid = c.getId().toString();
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                String raw = metricsCollector.fetchRawMetrics(host);
+                double gpu = metricsCollector.parseLoadFromMetrics(raw);
+                int depth = metricsCollector.parseQueueDepthFromMetrics(raw);
+                metricsCollector.updateQueueDepth(cid, depth);
+                return new double[]{gpu, depth};
+            }, monitorExecutor));
+        }
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("Load signal fetch partial/timeout: {}", e.getMessage());
+        }
+        double gpuSum = 0.0;
+        int depthSum = 0;
+        int ok = 0;
+        for (CompletableFuture<double[]> f : futures) {
+            if (!f.isDone() || f.isCompletedExceptionally()) continue;
+            try {
+                double[] pair = f.getNow(null);
+                if (pair == null) continue;
+                gpuSum += pair[0];
+                depthSum += (int) pair[1];
+                ok++;
+            } catch (Exception ignored) {
+            }
+        }
+        double avgGpu = ok > 0 ? gpuSum / ok : 0.0;
+        return new LoadSignal(avgGpu, depthSum, 0.0, numContainers, config.queueCapacityPerContainer);
     }
 
     private void stopExtraContainer() {
@@ -444,6 +583,70 @@ public class ApplicationMaster {
         return count > 0 ? total / count : 0.0;
     }
 
+    /**
+     * Polls {@code /v2/health/ready} on the container until it succeeds, then registers the
+     * container in ZooKeeper so Knox starts routing to it. Runs on the drainExecutor so the
+     * YARN callback thread is freed immediately.
+     *
+     * <p>The critical guarantee: a container is never visible via ZK discovery before it can
+     * answer a real inference. Previously registration happened in {@code onContainersAllocated}
+     * (before Triton even started), causing connection-refused errors during cluster warmup.
+     */
+    private void scheduleWarmupAndRegister(ContainerId containerId) {
+        Container container = findContainerById(containerId);
+        if (container == null) {
+            log.warn("scheduleWarmupAndRegister: container {} not found in runningContainers", containerId);
+            return;
+        }
+        if (drainExecutor == null || drainExecutor.isShutdown()) {
+            // AM shutdown race — skip.
+            return;
+        }
+        drainExecutor.submit(() -> runWarmupThenRegister(container));
+    }
+
+    private Container findContainerById(ContainerId id) {
+        synchronized (runningContainers) {
+            for (Container c : runningContainers) {
+                if (c.getId().equals(id)) return c;
+            }
+        }
+        return null;
+    }
+
+    private void runWarmupThenRegister(Container container) {
+        String host = container.getNodeId().getHost();
+        String cid = container.getId().toString();
+        long start = System.currentTimeMillis();
+        long deadline = start + config.warmupTimeoutMs;
+        long poll = Math.max(250L, config.warmupPollIntervalMs);
+        int attempt = 0;
+        while (System.currentTimeMillis() < deadline) {
+            attempt++;
+            if (metricsCollector.isContainerReady(host, config.tritonPort)) {
+                long took = System.currentTimeMillis() - start;
+                log.info("Container {} passed warmup in {}ms ({} probes)", cid, took, attempt);
+                metricsCollector.recordAlert("warmup_ok",
+                        "Container " + cid + " ready after " + took + "ms",
+                        "info");
+                registerInZooKeeper(container);
+                return;
+            }
+            try {
+                Thread.sleep(poll);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        // Timeout: register anyway to avoid wedging capacity, but warn loudly.
+        metricsCollector.recordAlert("warmup_timeout",
+                "Container " + cid + " did not pass /v2/health/ready within "
+                        + config.warmupTimeoutMs + "ms — registering to preserve capacity, expect cold-start latency",
+                "warning");
+        registerInZooKeeper(container);
+    }
+
     private void registerInZooKeeper(Container container) {
         if (zkClient == null) return;
 
@@ -498,7 +701,9 @@ public class ApplicationMaster {
                 log.info("Container allocated: {}. Launching Triton...", container.getId());
                 launchTriton(container);
                 runningContainers.add(container);
-                registerInZooKeeper(container);
+                // Registration in ZooKeeper is DEFERRED to post-warmup (see scheduleWarmup
+                // triggered in NMCallbackHandler.onContainerStarted). Registering here would
+                // have Knox route traffic to a container that has not yet loaded models.
             }
         }
 
@@ -649,8 +854,9 @@ public class ApplicationMaster {
     private class NMCallbackHandler extends NMClientAsync.AbstractCallbackHandler {
         @Override
         public void onContainerStarted(ContainerId containerId, Map<String, ByteBuffer> allServiceKeys) {
-            log.info("Container started: {}", containerId);
+            log.info("Container started: {}. Beginning warmup...", containerId);
             metricsCollector.recordContainerReady(containerId.toString());
+            scheduleWarmupAndRegister(containerId);
         }
 
         @Override
@@ -721,6 +927,32 @@ public class ApplicationMaster {
         return models;
     }
 
+    /**
+     * Reads {@code lora.json} from the root of the model repository, a {@code {base: [lora, ...]}}
+     * mapping. Triton's {@code openai_frontend} consumes this file natively; TARN re-reads it to
+     * populate the dashboard and to apply Ranger policies to LoRA adapters as separate resources.
+     * Cached result is recomputed every call — the file is small and operators rotate adapters
+     * without restarting the AM.
+     */
+    public Map<String, List<String>> getAvailableLoraAdapters() {
+        Map<String, List<String>> empty = Collections.emptyMap();
+        if (config.modelRepository == null || config.modelRepository.isEmpty()) return empty;
+        try {
+            Path loraPath = new Path(config.modelRepository, "lora.json");
+            FileSystem fs = loraPath.getFileSystem(conf);
+            if (!fs.exists(loraPath)) return empty;
+            try (java.io.InputStream in = fs.open(loraPath)) {
+                byte[] bytes = in.readAllBytes();
+                com.fasterxml.jackson.databind.ObjectMapper om = new com.fasterxml.jackson.databind.ObjectMapper();
+                return om.readValue(bytes,
+                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, List<String>>>() { });
+            }
+        } catch (Exception e) {
+            log.warn("Failed to read lora.json from model repository: {}", e.getMessage());
+            return empty;
+        }
+    }
+
     public Resource getAvailableResources() {
         if (amRMClient != null) {
             return amRMClient.getAvailableResources();
@@ -734,6 +966,35 @@ public class ApplicationMaster {
 
     public RangerAuthorizer getRangerAuthorizer() {
         return rangerAuthorizer;
+    }
+
+    public QuotaEnforcer getQuotaEnforcer() {
+        return quotaEnforcer;
+    }
+
+    /**
+     * Reads the quota JSON file from HDFS (or local) and replaces the in-memory rule set.
+     * Called on startup and again by the hot-reload watcher (P2.8).
+     */
+    public void loadQuotasFromConfig() {
+        if (config.quotasPath == null || config.quotasPath.isEmpty()) {
+            return;
+        }
+        try {
+            Path p = new Path(config.quotasPath);
+            FileSystem fs = p.getFileSystem(conf);
+            if (!fs.exists(p)) {
+                log.warn("Quotas path {} does not exist", config.quotasPath);
+                return;
+            }
+            byte[] bytes;
+            try (java.io.InputStream in = fs.open(p)) {
+                bytes = in.readAllBytes();
+            }
+            quotaEnforcer.loadFromJson(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            log.error("Failed to load quotas from {}: {}", config.quotasPath, e.getMessage());
+        }
     }
 
     public int getTargetNumContainers() {

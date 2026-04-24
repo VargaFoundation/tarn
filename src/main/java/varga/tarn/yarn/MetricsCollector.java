@@ -43,6 +43,15 @@ public class MetricsCollector {
     private static final Pattern SAFE_HOST = Pattern.compile(
             "^(?!.*\\.\\.)([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$");
 
+    /**
+     * Prometheus histogram bucket boundaries in seconds. Chosen to give useful resolution across
+     * the inference range we care about — from batch ONNX classifiers (sub-10 ms) to LLM chat
+     * completions (multi-second). Exposed publicly so the Prometheus endpoint can emit them.
+     */
+    public static final double[] LATENCY_BUCKETS_SECONDS = {
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0
+    };
+
     private final HttpClient httpClient;
     private final int metricsPort;
     // Cached host resolution — refused hosts stay refused across fetches.
@@ -55,6 +64,12 @@ public class MetricsCollector {
     private final Map<String, Long> errorCountsByModel = new ConcurrentHashMap<>();
     private final Map<String, Long> requestCountsByModel = new ConcurrentHashMap<>();
     private final Map<String, Integer> queueDepthByContainer = new ConcurrentHashMap<>();
+
+    // Prometheus-native histogram state: cumulative bucket counts, total sum, total count.
+    // Lifecycle-wise these grow forever per-model; counters-in-a-counter-world is intentional.
+    private final Map<String, long[]> histogramBucketsByModel = new ConcurrentHashMap<>();
+    private final Map<String, Double> histogramSumByModel = new ConcurrentHashMap<>();
+    private final Map<String, Long> histogramCountByModel = new ConcurrentHashMap<>();
 
     // Alerting state
     private final List<AlertEvent> alertEvents = Collections.synchronizedList(new ArrayList<>());
@@ -92,6 +107,21 @@ public class MetricsCollector {
 
     // Inference latency tracking
     public void recordInferenceLatency(String model, double latencyMs) {
+        double seconds = latencyMs / 1000.0;
+        // 1) Cumulative Prometheus histogram buckets — aggregatable across instances via histogram_quantile.
+        long[] buckets = histogramBucketsByModel.computeIfAbsent(model,
+                k -> new long[LATENCY_BUCKETS_SECONDS.length]);
+        synchronized (buckets) {
+            for (int i = 0; i < LATENCY_BUCKETS_SECONDS.length; i++) {
+                if (seconds <= LATENCY_BUCKETS_SECONDS[i]) {
+                    buckets[i]++;
+                }
+            }
+        }
+        histogramSumByModel.merge(model, seconds, Double::sum);
+        histogramCountByModel.merge(model, 1L, Long::sum);
+
+        // 2) Bounded window for on-the-fly percentile display in the dashboard — not scraped.
         inferenceLatencies.computeIfAbsent(model, k -> Collections.synchronizedList(new ArrayList<>()));
         List<Double> latencies = inferenceLatencies.get(model);
         synchronized (latencies) {
@@ -100,6 +130,31 @@ public class MetricsCollector {
                 latencies.remove(0);
             }
         }
+    }
+
+    /** Snapshot of cumulative bucket counts for Prometheus export. Caller must not mutate. */
+    public long[] getHistogramBucketsCumulative(String model) {
+        long[] src = histogramBucketsByModel.get(model);
+        if (src == null) return null;
+        synchronized (src) {
+            return src.clone();
+        }
+    }
+
+    public double getHistogramSum(String model) {
+        return histogramSumByModel.getOrDefault(model, 0.0);
+    }
+
+    public long getHistogramCount(String model) {
+        return histogramCountByModel.getOrDefault(model, 0L);
+    }
+
+    public long getRequestCount(String model) {
+        return requestCountsByModel.getOrDefault(model, 0L);
+    }
+
+    public long getErrorCount(String model) {
+        return errorCountsByModel.getOrDefault(model, 0L);
     }
 
     public Map<String, Double> getLatencyPercentiles(String model) {
@@ -339,11 +394,43 @@ public class MetricsCollector {
         }
         if (gpuCount > 0) return (totalGpuLoad / gpuCount) / 100.0;
 
-        // Fallback to a simple heuristic if no GPU metrics: 
+        // Fallback to a simple heuristic if no GPU metrics:
         if (metrics.contains("nv_inference_request_success")) {
             return 0.3; // Placeholder for "active"
         }
 
         return 0.0;
+    }
+
+    /**
+     * Parse the sum of {@code nv_inference_pending_request_count} samples across all
+     * {@code model=*} labels in the Triton metrics payload. This is the authoritative
+     * "pending queue size" used by queue-aware scaling.
+     */
+    public int parseQueueDepthFromMetrics(String metrics) {
+        if (metrics == null || metrics.isEmpty()) return 0;
+        Pattern p = Pattern.compile("nv_inference_pending_request_count\\{[^}]*\\}\\s+([\\d.]+)");
+        Matcher m = p.matcher(metrics);
+        int total = 0;
+        while (m.find()) {
+            try {
+                total += (int) Double.parseDouble(m.group(1));
+            } catch (NumberFormatException ignore) {
+                // Corrupt metric line — skip without blowing up scaling.
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Fetch fresh Triton metrics once, update the per-container queue depth cache, and return
+     * the measured depth. Callers doing one-shot reads in the scaling loop avoid double
+     * scrapes this way.
+     */
+    public int refreshQueueDepth(String containerId, String host) {
+        String raw = fetchRawMetrics(host);
+        int depth = parseQueueDepthFromMetrics(raw);
+        updateQueueDepth(containerId, depth);
+        return depth;
     }
 }

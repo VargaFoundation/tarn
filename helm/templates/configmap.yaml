@@ -8,6 +8,25 @@ metadata:
 data:
   HADOOP_CONF_DIR: {{ .Values.config.hadoopConfDir | quote }}
   YARN_RESOURCEMANAGER_ADDRESS: {{ .Values.config.yarnResourceManagerAddress | quote }}
-  ZOOKEEPER_QUORUM: {{ .Values.config.zookeeperQuorum | quote }}
-  TRITON_DOCKER_IMAGE: {{ .Values.config.tritonDockerImage | quote }}
-  MODEL_STORAGE_PATH: {{ .Values.config.modelStoragePath | quote }}
+  ZK_ENSEMBLE: {{ .Values.config.zookeeperQuorum | quote }}
+  TRITON_IMAGE: {{ .Values.config.tritonDockerImage | quote }}
+  MODEL_REPOSITORY: {{ .Values.config.modelStoragePath | quote }}
+  # TLS
+  TLS_ENABLED: {{ .Values.config.tlsEnabled | quote }}
+  {{- if .Values.config.tlsKeystorePath }}
+  TLS_KEYSTORE_PATH: {{ .Values.config.tlsKeystorePath | quote }}
+  {{- end }}
+  # OpenAI proxy
+  OPENAI_PROXY_ENABLED: {{ .Values.config.openaiProxyEnabled | quote }}
+  # OTEL
+  {{- if .Values.config.otelEndpoint }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otelEndpoint | quote }}
+  {{- end }}
+  # Scaling
+  SCALE_MODE: {{ .Values.config.scaleMode | quote }}
+  # Safety defaults
+  RANGER_STRICT: {{ .Values.config.rangerStrict | quote }}
+  ZK_REQUIRED: {{ .Values.config.zkRequired | quote }}
+  {{- if .Values.extraJavaOpts }}
+  JAVA_TOOL_OPTIONS: {{ .Values.extraJavaOpts | quote }}
+  {{- end }}

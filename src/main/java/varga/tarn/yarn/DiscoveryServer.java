@@ -26,6 +26,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 import freemarker.template.Configuration;
 import freemarker.template.Template;
 import freemarker.template.TemplateExceptionHandler;
@@ -64,12 +66,35 @@ public class DiscoveryServer {
     private final byte[] apiTokenBytes;
 
     public DiscoveryServer(TarnConfig config, ApplicationMaster am) throws IOException {
+        this(config, am, null);
+    }
+
+    /**
+     * Full constructor. {@code hadoopConf} is used only when TLS is enabled (to load the
+     * keystore via HDFS + resolve the password through the credential provider). Pass null in
+     * tests that run in plain-HTTP mode.
+     */
+    public DiscoveryServer(TarnConfig config, ApplicationMaster am, org.apache.hadoop.conf.Configuration hadoopConf) throws IOException {
         this.config = config;
         this.am = am;
         this.apiTokenBytes = (config.apiToken != null && !config.apiToken.isEmpty())
                 ? config.apiToken.getBytes(StandardCharsets.UTF_8)
                 : null;
-        this.httpServer = HttpServer.create(new InetSocketAddress(config.bindAddress, config.amPort), 0);
+        InetSocketAddress addr = new InetSocketAddress(config.bindAddress, config.amPort);
+        if (config.tlsEnabled) {
+            try {
+                HttpsServer https = HttpsServer.create(addr, 0);
+                HttpsConfigurator cfg = TlsContextLoader.buildConfigurator(config,
+                        hadoopConf != null ? hadoopConf : new org.apache.hadoop.conf.Configuration());
+                https.setHttpsConfigurator(cfg);
+                this.httpServer = https;
+                log.info("TLS enabled on AM port {}", config.amPort);
+            } catch (Exception e) {
+                throw new IOException("Failed to initialize TLS on AM port " + config.amPort, e);
+            }
+        } else {
+            this.httpServer = HttpServer.create(addr, 0);
+        }
 
         // Initialize FreeMarker
         this.freeMarkerConfig = new Configuration(Configuration.VERSION_2_3_32);
@@ -80,14 +105,42 @@ public class DiscoveryServer {
         this.freeMarkerConfig.setWrapUncheckedExceptions(true);
         this.freeMarkerConfig.setFallbackOnNullLoopVariable(false);
 
-        this.httpServer.createContext("/instances", new InstancesHandler());
-        this.httpServer.createContext("/dashboard", new DashboardHandler());
-        this.httpServer.createContext("/metrics", new PrometheusHandler());
-        this.httpServer.createContext("/health", new GlobalHealthHandler());
-        this.httpServer.createContext("/config", new ConfigHandler());
-        this.httpServer.createContext("/authorize", new AuthorizeHandler());
-        this.httpServer.createContext("/alerts", new AlertsHandler());
+        com.sun.net.httpserver.Filter securityHeaders = new SecurityHeadersFilter(config.tlsEnabled);
+        createSecuredContext("/instances", new InstancesHandler(), securityHeaders);
+        createSecuredContext("/dashboard", new DashboardHandler(), securityHeaders);
+        createSecuredContext("/metrics", new PrometheusHandler(), securityHeaders);
+        createSecuredContext("/health", new GlobalHealthHandler(), securityHeaders);
+        createSecuredContext("/config", new ConfigHandler(), securityHeaders);
+        createSecuredContext("/authorize", new AuthorizeHandler(), securityHeaders);
+        createSecuredContext("/alerts", new AlertsHandler(), securityHeaders);
         this.httpServer.setExecutor(null);
+    }
+
+    private void createSecuredContext(String path, HttpHandler handler, com.sun.net.httpserver.Filter filter) {
+        com.sun.net.httpserver.HttpContext ctx = this.httpServer.createContext(path, handler);
+        ctx.getFilters().add(filter);
+    }
+
+    /**
+     * Applies defense-in-depth HTTP security headers to every response before the handler
+     * writes any status. HSTS is only sent over TLS (per RFC 6797 §7.2).
+     */
+    static final class SecurityHeadersFilter extends com.sun.net.httpserver.Filter {
+        private final boolean tls;
+        SecurityHeadersFilter(boolean tls) { this.tls = tls; }
+        @Override public String description() { return "tarn-security-headers"; }
+        @Override
+        public void doFilter(HttpExchange exchange, Chain chain) throws IOException {
+            var headers = exchange.getResponseHeaders();
+            headers.set("X-Content-Type-Options", "nosniff");
+            headers.set("X-Frame-Options", "DENY");
+            headers.set("Referrer-Policy", "no-referrer");
+            headers.set("Cache-Control", "no-store");
+            if (tls) {
+                headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+            }
+            chain.doFilter(exchange);
+        }
     }
 
     public void start() {
@@ -254,6 +307,25 @@ public class DiscoveryServer {
             model.put("availableModels", authorizedModels);
             model.put("rangerEnabled", config.rangerService != null && !config.rangerService.isEmpty());
 
+            // Multi-LoRA: map of base -> list of visible adapters, filtered by Ranger
+            // (resource = "base#lora" combined name to allow per-adapter policies).
+            Map<String, List<String>> loraMap = am.getAvailableLoraAdapters();
+            Map<String, List<String>> authorizedLoras = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, List<String>> e : loraMap.entrySet()) {
+                String base = e.getKey();
+                if (!authorizedModels.contains(base)) continue; // Hide adapters for hidden bases.
+                List<String> visible = new ArrayList<>();
+                for (String lora : e.getValue()) {
+                    if (am.getRangerAuthorizer().isAllowed(user, groups, "list", base + "#" + lora)) {
+                        visible.add(lora);
+                    }
+                }
+                if (!visible.isEmpty()) {
+                    authorizedLoras.put(base, visible);
+                }
+            }
+            model.put("loraAdapters", authorizedLoras);
+
             // Samples for models
             if (!containers.isEmpty()) {
                 String firstHost = containers.get(0).getNodeId().getHost();
@@ -361,12 +433,33 @@ public class DiscoveryServer {
                 }
             }
 
-            // Inference latency percentiles per model
-            sb.append("\n# HELP tarn_inference_latency_p50_ms Inference latency p50 in milliseconds\n");
+            // Native Prometheus histogram — aggregatable across instances via histogram_quantile().
+            // The old per-instance p50/p95/p99 gauges are kept for dashboard compatibility but
+            // consumers should migrate to the histogram for cross-replica rollups.
+            sb.append("\n# HELP tarn_inference_latency_seconds Inference latency in seconds\n");
+            sb.append("# TYPE tarn_inference_latency_seconds histogram\n");
+            for (String model : mc.getTrackedModels()) {
+                long[] buckets = mc.getHistogramBucketsCumulative(model);
+                long count = mc.getHistogramCount(model);
+                double sum = mc.getHistogramSum(model);
+                if (buckets != null) {
+                    for (int i = 0; i < MetricsCollector.LATENCY_BUCKETS_SECONDS.length; i++) {
+                        sb.append("tarn_inference_latency_seconds_bucket{model=\"").append(model)
+                                .append("\",le=\"").append(MetricsCollector.LATENCY_BUCKETS_SECONDS[i]).append("\"} ")
+                                .append(buckets[i]).append("\n");
+                    }
+                }
+                sb.append("tarn_inference_latency_seconds_bucket{model=\"").append(model).append("\",le=\"+Inf\"} ").append(count).append("\n");
+                sb.append("tarn_inference_latency_seconds_sum{model=\"").append(model).append("\"} ").append(sum).append("\n");
+                sb.append("tarn_inference_latency_seconds_count{model=\"").append(model).append("\"} ").append(count).append("\n");
+            }
+
+            // Per-instance percentile approximation (dashboard helper, deprecated for scraping).
+            sb.append("\n# HELP tarn_inference_latency_p50_ms DEPRECATED: use histogram. Per-instance p50.\n");
             sb.append("# TYPE tarn_inference_latency_p50_ms gauge\n");
-            sb.append("# HELP tarn_inference_latency_p95_ms Inference latency p95 in milliseconds\n");
+            sb.append("# HELP tarn_inference_latency_p95_ms DEPRECATED: use histogram. Per-instance p95.\n");
             sb.append("# TYPE tarn_inference_latency_p95_ms gauge\n");
-            sb.append("# HELP tarn_inference_latency_p99_ms Inference latency p99 in milliseconds\n");
+            sb.append("# HELP tarn_inference_latency_p99_ms DEPRECATED: use histogram. Per-instance p99.\n");
             sb.append("# TYPE tarn_inference_latency_p99_ms gauge\n");
             for (String model : mc.getTrackedModels()) {
                 Map<String, Double> percentiles = mc.getLatencyPercentiles(model);
@@ -375,7 +468,20 @@ public class DiscoveryServer {
                 sb.append("tarn_inference_latency_p99_ms{model=\"").append(model).append("\"} ").append(percentiles.get("p99")).append("\n");
             }
 
-            // Error rates per model
+            // Total inference requests split by success/error — lets you compute error rate
+            // in Prometheus (sum(rate(tarn_inference_requests_total{status="error"}[5m])) / ...).
+            sb.append("\n# HELP tarn_inference_requests_total Total inference requests counted by model and outcome\n");
+            sb.append("# TYPE tarn_inference_requests_total counter\n");
+            for (String model : mc.getTrackedModels()) {
+                long total = mc.getRequestCount(model);
+                long errors = mc.getErrorCount(model);
+                long success = Math.max(0L, total - errors);
+                sb.append("tarn_inference_requests_total{model=\"").append(model).append("\",status=\"success\"} ").append(success).append("\n");
+                sb.append("tarn_inference_requests_total{model=\"").append(model).append("\",status=\"error\"} ").append(errors).append("\n");
+            }
+
+            // Error rate per model — kept as gauge for dashboards; Prometheus users should
+            // derive it from the counter above.
             sb.append("\n# HELP tarn_model_error_rate Error rate per model (0.0 to 1.0)\n");
             sb.append("# TYPE tarn_model_error_rate gauge\n");
             for (Map.Entry<String, Double> entry : mc.getAllErrorRates().entrySet()) {
