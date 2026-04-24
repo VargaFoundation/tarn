@@ -32,6 +32,11 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Leader election: the operator creates/updates a Lease to coordinate active/standby
+  # replicas. Without this the operator can still run but single-replica only.
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -86,6 +91,10 @@ spec:
           env:
             - name: WATCH_NAMESPACE
               value: {{ .Values.operator.watchNamespace | default "" | quote }}
+            - name: LEADER_ELECTION_ENABLED
+              value: {{ .Values.operator.leaderElection.enabled | default true | quote }}
+            - name: LEADER_ELECTION_NAMESPACE
+              value: {{ .Values.operator.leaderElection.namespace | default .Release.Namespace | quote }}
           resources:
             {{- toYaml (.Values.operator.resources | default dict) | nindent 12 }}
 {{- end }}

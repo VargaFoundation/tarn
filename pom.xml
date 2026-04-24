@@ -118,6 +118,56 @@
 					<groupId>org.apache.hadoop</groupId>
 					<artifactId>*</artifactId>
 				</exclusion>
+				<!-- Ranger audit pulls a fleet of optional audit-sink backends:
+				       - Solr + Lucene (~200 MB)
+				       - AWS SDK for S3/CloudWatch audit sinks (~130k classes)
+				       - Elasticsearch client
+				       - Kafka producer
+				       - HBase / OrcFile / Joda-Time
+				     TARN sends audits via log4j per the docs, so none of these are used. Keep
+				     the uber-JAR at inference-runtime size. Operators who need specific sinks
+				     can add them back to the Docker image. -->
+				<exclusion>
+					<groupId>org.apache.solr</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.lucene</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>com.amazonaws</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.elasticsearch</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.elasticsearch.client</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.elasticsearch.plugin</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.kafka</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.orc</groupId>
+					<artifactId>*</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>joda-time</groupId>
+					<artifactId>joda-time</artifactId>
+				</exclusion>
+				<!-- jersey-bundle is a 1.x Jersey superset; we don't call it from TARN code. -->
+				<exclusion>
+					<groupId>com.sun.jersey</groupId>
+					<artifactId>jersey-bundle</artifactId>
+				</exclusion>
 			</exclusions>
 		</dependency>
 		<!-- OpenTelemetry API only. SDK and exporters are injected via the otel Java agent

@@ -140,13 +140,18 @@ extraJavaOpts: ""
 # controller in addition to (or instead of) the YARN orchestrator daemon.
 operator:
   enabled: false
-  replicaCount: 1
+  # Default to 2 replicas when leader election is on — instant failover if the active pod dies.
+  replicaCount: 2
   image:
     repository: ghcr.io/varga-foundation/tarn-operator
     tag: latest
     pullPolicy: IfNotPresent
   # Namespace to watch. Empty string = watch every namespace (requires cluster-wide RBAC).
   watchNamespace: ""
+  leaderElection:
+    enabled: true
+    # Namespace holding the Lease object. Defaults to the release namespace.
+    namespace: ""
   resources:
     limits:
       memory: "512Mi"
