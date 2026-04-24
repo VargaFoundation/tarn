@@ -157,6 +157,29 @@ public class MetricsCollector {
         return errorCountsByModel.getOrDefault(model, 0L);
     }
 
+    // Token accounting (OpenAI `usage` field) — keyed by (user, model) so you can chargeback.
+    // Exposed as counters in /metrics so downstream billing can consume them directly.
+    private final Map<String, Long> tokensInByUserModel = new ConcurrentHashMap<>();
+    private final Map<String, Long> tokensOutByUserModel = new ConcurrentHashMap<>();
+
+    public void recordTokens(String user, String model, long promptTokens, long completionTokens) {
+        String key = safe(user) + "|" + safe(model);
+        if (promptTokens > 0) tokensInByUserModel.merge(key, promptTokens, Long::sum);
+        if (completionTokens > 0) tokensOutByUserModel.merge(key, completionTokens, Long::sum);
+    }
+
+    public Map<String, Long> getTokensIn() {
+        return new LinkedHashMap<>(tokensInByUserModel);
+    }
+
+    public Map<String, Long> getTokensOut() {
+        return new LinkedHashMap<>(tokensOutByUserModel);
+    }
+
+    private static String safe(String s) {
+        return s == null ? "unknown" : s.replace('|', '_');
+    }
+
     public Map<String, Double> getLatencyPercentiles(String model) {
         Map<String, Double> percentiles = new LinkedHashMap<>();
         List<Double> latencies = inferenceLatencies.get(model);

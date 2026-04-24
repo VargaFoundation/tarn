@@ -78,15 +78,24 @@ public class RangerAuthorizer {
     }
 
     public boolean isAllowed(String user, Set<String> groups, String action, String model) {
+        return isAllowed(user, groups, action, model, null);
+    }
+
+    /**
+     * Full isAllowed taking the real {@code clientIp} for audit enrichment. Ranger audit sinks
+     * (Solr, Log4j, HDFS) record this value verbatim and regulated environments expect it.
+     * Prior to P2.2 we were always passing {@code "0.0.0.0"}, which defeated audit traceability.
+     */
+    public boolean isAllowed(String user, Set<String> groups, String action, String model, String clientIp) {
         if (initFailed) {
             // Fail-closed in strict mode — regulated clusters MUST not fall back to open.
             if (config.rangerStrict) {
-                log.warn("Ranger in degraded state, DENY-by-default (strict): user={} action={} model={}",
-                        user, action, model);
+                log.warn("Ranger in degraded state, DENY-by-default (strict): user={} action={} model={} ip={}",
+                        user, action, model, clientIp);
                 return false;
             }
-            log.warn("Ranger in degraded state, ALLOW (non-strict): user={} action={} model={}",
-                    user, action, model);
+            log.warn("Ranger in degraded state, ALLOW (non-strict): user={} action={} model={} ip={}",
+                    user, action, model, clientIp);
             return true;
         }
         if (plugin == null) {
@@ -103,7 +112,8 @@ public class RangerAuthorizer {
         request.setUser(user);
         request.setUserGroups(groups);
         request.setAccessTime(new Date());
-        request.setClientIPAddress("0.0.0.0"); // Could be improved if we pass the real IP
+        request.setClientIPAddress(clientIp == null || clientIp.isEmpty() ? "unknown" : clientIp);
+        request.setAction(action); // Explicit for audit clarity in Solr/log4j sinks.
 
         RangerAccessResult result = plugin.isAccessAllowed(request, auditHandler);
 

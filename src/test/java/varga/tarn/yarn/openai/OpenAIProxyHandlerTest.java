@@ -138,8 +138,8 @@ public class OpenAIProxyHandlerTest {
 
     @Test
     public void listsModelsFilteredByRanger() throws Exception {
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("list"), eq("llama-3-70b"))).thenReturn(true);
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("list"), eq("stable-diffusion"))).thenReturn(false);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("list"), eq("llama-3-70b"), anyString())).thenReturn(true);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("list"), eq("stable-diffusion"), anyString())).thenReturn(false);
 
         HttpResponse<String> resp = HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/models"))).build(),
@@ -153,7 +153,7 @@ public class OpenAIProxyHandlerTest {
 
     @Test
     public void deniedInferReturns403() throws Exception {
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"))).thenReturn(false);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(false);
 
         HttpResponse<String> resp = HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
@@ -171,7 +171,7 @@ public class OpenAIProxyHandlerTest {
 
     @Test
     public void allowedInferProxiesAndCountsMetrics() throws Exception {
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"))).thenReturn(true);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
 
         HttpResponse<String> resp = HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
@@ -191,7 +191,7 @@ public class OpenAIProxyHandlerTest {
 
     @Test
     public void streamingResponseIsRelayedWithoutBuffering() throws Exception {
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"))).thenReturn(true);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
 
         HttpResponse<String> resp = HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
@@ -212,8 +212,8 @@ public class OpenAIProxyHandlerTest {
     @Test
     public void loraSuffixIsCheckedAgainstRangerSeparately() throws Exception {
         // Base allowed, LoRA denied.
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"))).thenReturn(true);
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b#customer-support"))).thenReturn(false);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b#customer-support"), anyString())).thenReturn(false);
 
         HttpResponse<String> resp = HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
@@ -230,7 +230,7 @@ public class OpenAIProxyHandlerTest {
     @Test
     public void returns503WhenNoContainers() throws Exception {
         when(mockAm.getRunningContainers()).thenReturn(new ArrayList<>());
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), anyString())).thenReturn(true);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), anyString(), anyString())).thenReturn(true);
 
         HttpResponse<String> resp = HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
@@ -253,6 +253,59 @@ public class OpenAIProxyHandlerTest {
     }
 
     @Test
+    public void tokenUsageFromResponseIsAccounted() throws Exception {
+        // Replace fake Triton handler with one that returns an OpenAI usage block.
+        fakeTriton.removeContext("/v1/chat/completions");
+        fakeTriton.createContext("/v1/chat/completions", exh -> {
+            tritonHits.incrementAndGet();
+            byte[] resp = ("{\"id\":\"cmpl-1\",\"choices\":[{\"message\":{\"content\":\"ok\"}}]," +
+                    "\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":17,\"total_tokens\":59}}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exh.getResponseHeaders().set("Content-Type", "application/json");
+            exh.sendResponseHeaders(200, resp.length);
+            try (var os = exh.getResponseBody()) { os.write(resp); }
+        });
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
+
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
+                        .header("Content-Type", "application/json")
+                        .header("X-Forwarded-User", "alice")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"model\":\"llama-3-70b\",\"messages\":[]}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+
+        // Token counters must be accumulated per (user, model).
+        assertEquals(42L, (long) metrics.getTokensIn().get("alice|llama-3-70b"));
+        assertEquals(17L, (long) metrics.getTokensOut().get("alice|llama-3-70b"));
+    }
+
+    @Test
+    public void clientIpPropagatesToRanger() throws Exception {
+        // Verify X-Forwarded-For (set by Knox / ingress) is the IP passed to Ranger audit.
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
+
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
+                        .header("Content-Type", "application/json")
+                        .header("X-Forwarded-User", "alice")
+                        .header("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"model\":\"llama-3-70b\",\"messages\":[]}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+
+        // First value in the XFF chain is the client. Ranger must receive it verbatim.
+        org.mockito.ArgumentCaptor<String> ip = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(mockRanger, atLeastOnce()).isAllowed(
+                anyString(), anySet(), eq("infer"), eq("llama-3-70b"), ip.capture());
+        assertEquals("203.0.113.7", ip.getValue());
+    }
+
+    @Test
     public void shadowEndpointReceivesAtSampleRate1() throws Exception {
         // Build a second fake Triton, point the proxy's shadow config to it, verify it sees
         // the mirrored request while the primary still serves the client.
@@ -271,7 +324,7 @@ public class OpenAIProxyHandlerTest {
             config.shadowSampleRate = 1.0;
             // Rebuild proxy to pick up new config (handler reads config at handle time? It reads
             // on every request, so changing config fields works without restart).
-            when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"))).thenReturn(true);
+            when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
 
             HttpResponse<String> resp = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
@@ -300,7 +353,7 @@ public class OpenAIProxyHandlerTest {
         varga.tarn.yarn.QuotaEnforcer quotas = new varga.tarn.yarn.QuotaEnforcer();
         quotas.setGlobalLimit(1);
         when(mockAm.getQuotaEnforcer()).thenReturn(quotas);
-        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"))).thenReturn(true);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
 
         HttpRequest req = HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
                 .header("Content-Type", "application/json")

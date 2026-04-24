@@ -488,6 +488,25 @@ public class DiscoveryServer {
                 sb.append("tarn_model_error_rate{model=\"").append(entry.getKey()).append("\"} ").append(entry.getValue()).append("\n");
             }
 
+            // LLM token accounting — drives per-user chargeback. Labels: user, model.
+            // Counter semantics (monotonically increasing) — use rate() / increase() in PromQL.
+            sb.append("\n# HELP tarn_tokens_in_total Total prompt tokens consumed\n");
+            sb.append("# TYPE tarn_tokens_in_total counter\n");
+            for (Map.Entry<String, Long> e : mc.getTokensIn().entrySet()) {
+                String[] um = e.getKey().split("\\|", 2);
+                String u = um.length > 0 ? um[0] : "unknown";
+                String m = um.length > 1 ? um[1] : "unknown";
+                sb.append("tarn_tokens_in_total{user=\"").append(u).append("\",model=\"").append(m).append("\"} ").append(e.getValue()).append("\n");
+            }
+            sb.append("\n# HELP tarn_tokens_out_total Total completion tokens generated\n");
+            sb.append("# TYPE tarn_tokens_out_total counter\n");
+            for (Map.Entry<String, Long> e : mc.getTokensOut().entrySet()) {
+                String[] um = e.getKey().split("\\|", 2);
+                String u = um.length > 0 ? um[0] : "unknown";
+                String m = um.length > 1 ? um[1] : "unknown";
+                sb.append("tarn_tokens_out_total{user=\"").append(u).append("\",model=\"").append(m).append("\"} ").append(e.getValue()).append("\n");
+            }
+
             String response = sb.toString();
             exchange.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
             exchange.sendResponseHeaders(200, response.length());

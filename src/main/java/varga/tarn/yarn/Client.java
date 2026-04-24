@@ -152,6 +152,28 @@ public class Client {
             env.put("RANGER_APP_ID", config.rangerAppId);
         }
         env.put("RANGER_AUDIT", String.valueOf(config.rangerAudit));
+        // Propagate every P1/P2 knob — without these, the AM would fall back to its own
+        // defaults instead of honoring what the operator passed to the Client.
+        env.put("RANGER_STRICT", String.valueOf(config.rangerStrict));
+        env.put("ZK_REQUIRED", String.valueOf(config.zkRequired));
+        env.put("DRAIN_TIMEOUT_MS", String.valueOf(config.drainTimeoutMs));
+        env.put("MONITOR_INTERVAL_MS", String.valueOf(config.monitorIntervalMs));
+        env.put("TLS_ENABLED", String.valueOf(config.tlsEnabled));
+        if (config.tlsKeystorePath != null) env.put("TLS_KEYSTORE_PATH", config.tlsKeystorePath);
+        if (config.tlsKeystorePasswordAlias != null) env.put("TLS_KEYSTORE_PASSWORD_ALIAS", config.tlsKeystorePasswordAlias);
+        if (config.tlsKeystoreType != null) env.put("TLS_KEYSTORE_TYPE", config.tlsKeystoreType);
+        env.put("OPENAI_PROXY_ENABLED", String.valueOf(config.openaiProxyEnabled));
+        env.put("OPENAI_PROXY_PORT", String.valueOf(config.openaiProxyPort));
+        if (config.otelEndpoint != null) env.put("OTEL_EXPORTER_OTLP_ENDPOINT", config.otelEndpoint);
+        env.put("SCALE_MODE", config.scaleMode);
+        env.put("QUEUE_CAPACITY_PER_CONTAINER", String.valueOf(config.queueCapacityPerContainer));
+        env.put("WARMUP_TIMEOUT_MS", String.valueOf(config.warmupTimeoutMs));
+        env.put("WARMUP_POLL_INTERVAL_MS", String.valueOf(config.warmupPollIntervalMs));
+        if (config.quotasPath != null) env.put("QUOTAS_PATH", config.quotasPath);
+        env.put("ACCELERATOR_TYPE", config.acceleratorType);
+        if (config.gpuSliceSize != null) env.put("GPU_SLICE_SIZE", config.gpuSliceSize);
+        if (config.shadowEndpoint != null) env.put("SHADOW_ENDPOINT", config.shadowEndpoint);
+        env.put("SHADOW_SAMPLE_RATE", String.valueOf(config.shadowSampleRate));
 
         // Add classpath to environment
         StringBuilder classPathEnv = new StringBuilder(ApplicationConstants.Environment.CLASSPATH.$())

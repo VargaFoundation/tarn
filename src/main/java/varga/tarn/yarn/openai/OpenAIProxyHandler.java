@@ -118,11 +118,12 @@ public class OpenAIProxyHandler implements HttpHandler {
     private void handleListModels(HttpExchange ex) throws IOException {
         String user = getUser(ex);
         Set<String> groups = getGroups(user);
+        String clientIp = resolveClientIp(ex);
         RangerAuthorizer ra = am.getRangerAuthorizer();
 
         List<Map<String, Object>> data = new ArrayList<>();
         for (String m : am.getAvailableModels()) {
-            if (ra != null && !ra.isAllowed(user, groups, "list", m)) continue;
+            if (ra != null && !ra.isAllowed(user, groups, "list", m, clientIp)) continue;
             Map<String, Object> entry = new LinkedHashMap<>();
             entry.put("id", m);
             entry.put("object", "model");
@@ -206,10 +207,11 @@ public class OpenAIProxyHandler implements HttpHandler {
             }
         }
 
+        String clientIp = resolveClientIp(ex);
         RangerAuthorizer ra = am.getRangerAuthorizer();
         if (ra != null) {
-            if (!ra.isAllowed(user, groups, "infer", baseModel)) {
-                log.info("Ranger DENY infer: user={} model={}", user, baseModel);
+            if (!ra.isAllowed(user, groups, "infer", baseModel, clientIp)) {
+                log.info("Ranger DENY infer: user={} model={} ip={}", user, baseModel, clientIp);
                 span.setStatus(StatusCode.ERROR, "ranger_deny");
                 writeJsonError(ex, 403, "permission_denied",
                         "Access to model '" + baseModel + "' is denied by policy");
@@ -217,8 +219,8 @@ public class OpenAIProxyHandler implements HttpHandler {
             }
             // When a LoRA adapter is requested, the combined name is also a resource so policies
             // can grant base but restrict specific LoRAs.
-            if (lora != null && !ra.isAllowed(user, groups, "infer", requestedModel)) {
-                log.info("Ranger DENY LoRA infer: user={} combined={}", user, requestedModel);
+            if (lora != null && !ra.isAllowed(user, groups, "infer", requestedModel, clientIp)) {
+                log.info("Ranger DENY LoRA infer: user={} combined={} ip={}", user, requestedModel, clientIp);
                 span.setStatus(StatusCode.ERROR, "ranger_deny_lora");
                 writeJsonError(ex, 403, "permission_denied",
                         "Access to LoRA '" + lora + "' on '" + baseModel + "' is denied by policy");
@@ -273,14 +275,25 @@ public class OpenAIProxyHandler implements HttpHandler {
                 upstreamSpan.setAttribute("http.status_code", (long) resp.statusCode());
                 relayStreamingResponse(resp, ex);
                 mc.recordModelRequest(baseModel, resp.statusCode() / 100 == 2);
+                // Streaming responses: token usage is in the final "data: {...usage:...}"
+                // chunk per OpenAI spec. Parsing that reliably requires buffering the stream,
+                // which defeats streaming. Operators who need token accounting for streaming
+                // should enable stream_options={"include_usage": true} and point Triton's
+                // openai_frontend at our /v1/usage callback (future work).
             } else {
                 HttpResponse<byte[]> resp = upstream.send(forwarded,
                         HttpResponse.BodyHandlers.ofByteArray());
                 upstreamSpan.setAttribute("http.status_code", (long) resp.statusCode());
+                boolean ok = resp.statusCode() / 100 == 2;
+                // Record metrics BEFORE flushing the response so tests (and any sync consumer
+                // of the counters) observe the update atomically with the visible response.
+                mc.recordModelRequest(baseModel, ok);
+                if (ok) {
+                    recordTokensIfPresent(resp.body(), user, baseModel);
+                }
                 writeResponse(ex, resp.statusCode(),
                         firstHeader(resp, "Content-Type", "application/json"),
                         resp.body());
-                mc.recordModelRequest(baseModel, resp.statusCode() / 100 == 2);
             }
         } catch (java.net.http.HttpConnectTimeoutException e) {
             upstreamSpan.setStatus(StatusCode.ERROR, "upstream_timeout");
@@ -296,6 +309,40 @@ public class OpenAIProxyHandler implements HttpHandler {
             mc.recordInferenceLatency(baseModel, latencyMs);
             upstreamSpan.end();
         }
+    }
+
+    /**
+     * Parses the OpenAI {@code usage} field from a successful non-streaming completion and
+     * updates per-(user, model) token counters. A malformed or missing usage block is
+     * silently ignored — usage is best-effort telemetry, not a contract.
+     */
+    private void recordTokensIfPresent(byte[] body, String user, String model) {
+        try {
+            com.fasterxml.jackson.databind.JsonNode root = om.readTree(body);
+            com.fasterxml.jackson.databind.JsonNode usage = root.path("usage");
+            if (usage.isMissingNode() || !usage.isObject()) return;
+            long prompt = usage.path("prompt_tokens").asLong(0);
+            long completion = usage.path("completion_tokens").asLong(0);
+            if (prompt > 0 || completion > 0) {
+                am.getMetricsCollector().recordTokens(user, model, prompt, completion);
+            }
+        } catch (Exception ignored) {
+            // Non-OpenAI shaped response (e.g. image generation): no usage to record.
+        }
+    }
+
+    /**
+     * Best-effort client IP. When Knox or an ingress proxies us, X-Forwarded-For is the
+     * source of truth; fall back to the raw peer socket when no trusted proxy is set.
+     */
+    private static String resolveClientIp(HttpExchange ex) {
+        String xff = ex.getRequestHeaders().getFirst("X-Forwarded-For");
+        if (xff != null && !xff.isEmpty()) {
+            int c = xff.indexOf(',');
+            return (c > 0 ? xff.substring(0, c) : xff).trim();
+        }
+        java.net.InetSocketAddress peer = ex.getRemoteAddress();
+        return peer == null ? "unknown" : peer.getAddress().getHostAddress();
     }
 
     /**
