@@ -133,6 +133,44 @@
 			<artifactId>opentelemetry-context</artifactId>
 			<version>1.40.0</version>
 		</dependency>
+		<!-- Kubernetes Operator (P2.1). provided scope means:
+		       - Compiles the operator classes into the regular JAR
+		       - Does NOT bundle fabric8 into the shaded uber-JAR, so YARN-only users don't pay the weight
+		       - Operator runtime (Dockerfile.operator) adds the jars back onto the classpath
+		     The result: one source tree, two lean Docker images. -->
+		<dependency>
+			<groupId>io.fabric8</groupId>
+			<artifactId>kubernetes-client</artifactId>
+			<version>6.13.1</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.fabric8</groupId>
+			<artifactId>kubernetes-model-core</artifactId>
+			<version>6.13.1</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.fabric8</groupId>
+			<artifactId>kubernetes-model-apps</artifactId>
+			<version>6.13.1</version>
+			<scope>provided</scope>
+		</dependency>
+		<!-- fabric8 KubernetesMockServerExtension transitively needs JUnit 4 (ExternalResource).
+		     Pin junit:junit to a real 4.x version — the Hadoop parent binds it to ${junit.version}
+		     which we override to 5.10.1, a nonexistent 4.x coord. -->
+		<dependency>
+			<groupId>junit</groupId>
+			<artifactId>junit</artifactId>
+			<version>4.13.2</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.fabric8</groupId>
+			<artifactId>kubernetes-server-mock</artifactId>
+			<version>6.13.1</version>
+			<scope>test</scope>
+		</dependency>
 
 		<dependency>
 			<groupId>org.junit.jupiter</groupId>
@@ -468,5 +506,43 @@
 
 		</plugins>
 	</build>
+
+	<profiles>
+		<!--
+		   Build profile for the Kubernetes operator image (Dockerfile.operator).
+		   Activate with `mvn package -Poperator` — it resolves the fabric8 jars
+		   (which are `provided` in the main build) into target/operator-libs/ so the
+		   operator Dockerfile can copy them into the runtime image without pulling
+		   the whole internet at docker-build time.
+		-->
+		<profile>
+			<id>operator</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-dependency-plugin</artifactId>
+						<version>3.6.1</version>
+						<executions>
+							<execution>
+								<id>copy-operator-deps</id>
+								<phase>package</phase>
+								<goals>
+									<goal>copy-dependencies</goal>
+								</goals>
+								<configuration>
+									<outputDirectory>${project.build.directory}/operator-libs</outputDirectory>
+									<includeScope>provided</includeScope>
+									<includeGroupIds>io.fabric8,com.squareup.okhttp3,com.squareup.okio</includeGroupIds>
+									<overWriteReleases>false</overWriteReleases>
+									<overWriteSnapshots>true</overWriteSnapshots>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>

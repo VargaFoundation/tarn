@@ -1,0 +1,27 @@
+###
+# Operator image — built with `docker build -f Dockerfile.operator -t tarn-operator .`
+#
+# Produces a lean image (~150 MB) that runs the TARN Kubernetes operator.
+# Uses the same main JAR as the YARN orchestrator but layers fabric8 on top at
+# runtime, so the two images share the upstream build cache.
+###
+
+FROM eclipse-temurin:17-jdk-jammy AS build
+
+WORKDIR /app
+COPY pom.xml .
+COPY .mvn ./.mvn
+COPY mvnw .
+COPY src ./src
+
+# -Poperator drops fabric8 and its http client into target/operator-libs/
+RUN chmod +x mvnw && ./mvnw clean package -DskipTests -B -Poperator
+
+FROM eclipse-temurin:17-jre-jammy
+
+WORKDIR /app
+COPY --from=build /app/target/tarn-orchestrator-*.jar app.jar
+COPY --from=build /app/target/operator-libs/ lib/
+
+# Classpath: the shaded main JAR first (our code), then the operator libs.
+ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "varga.tarn.operator.TarnOperator"]

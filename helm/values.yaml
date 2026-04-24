@@ -136,5 +136,24 @@ config:
 #   -javaagent:/opt/otel/opentelemetry-javaagent.jar
 extraJavaOpts: ""
 
+# Kubernetes Operator (P2.1). Disabled by default — enables the TritonDeployment CRD
+# controller in addition to (or instead of) the YARN orchestrator daemon.
+operator:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: ghcr.io/varga-foundation/tarn-operator
+    tag: latest
+    pullPolicy: IfNotPresent
+  # Namespace to watch. Empty string = watch every namespace (requires cluster-wide RBAC).
+  watchNamespace: ""
+  resources:
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+
 volumes: []
 volumeMounts: []

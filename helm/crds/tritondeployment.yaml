@@ -1,0 +1,187 @@
+###
+# #%L
+# Tarn
+# %%
+# Copyright (C) 2025 - 2026 Varga Foundation
+# %%
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# #L%
+###
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: tritondeployments.tarn.varga.io
+spec:
+  group: tarn.varga.io
+  names:
+    kind: TritonDeployment
+    listKind: TritonDeploymentList
+    plural: tritondeployments
+    singular: tritondeployment
+    shortNames:
+      - td
+      - triton
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [image, modelRepository]
+              properties:
+                image:
+                  type: string
+                  description: Triton Docker image (e.g. nvcr.io/nvidia/tritonserver:24.09-py3).
+                modelRepository:
+                  type: string
+                  description: Model repository location (hdfs://..., s3://..., or a PVC mount path).
+                replicas:
+                  type: integer
+                  minimum: 0
+                  default: 1
+                tensorParallelism:
+                  type: integer
+                  minimum: 1
+                  default: 1
+                pipelineParallelism:
+                  type: integer
+                  minimum: 1
+                  default: 1
+                accelerator:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                      enum: [nvidia_gpu, amd_gpu, intel_gaudi, aws_neuron, cpu_only]
+                      default: nvidia_gpu
+                    count:
+                      type: integer
+                      minimum: 0
+                      default: 1
+                    sliceSize:
+                      type: string
+                      description: MIG profile (e.g. 1g.10gb) or decimal fraction for MPS.
+                resources:
+                  type: object
+                  properties:
+                    memory:
+                      type: string
+                      default: "4Gi"
+                    cpu:
+                      type: string
+                      default: "2"
+                openaiProxy:
+                  type: object
+                  description: Opt-in OpenAI-compatible frontend in each Triton pod.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    port:
+                      type: integer
+                      default: 9000
+                scaling:
+                  type: object
+                  description: Horizontal autoscaling policy.
+                  properties:
+                    mode:
+                      type: string
+                      enum: [gpu_util, queue_depth, composite]
+                      default: composite
+                    minReplicas:
+                      type: integer
+                      minimum: 0
+                      default: 1
+                    maxReplicas:
+                      type: integer
+                      minimum: 1
+                      default: 10
+                    upThreshold:
+                      type: number
+                      default: 0.7
+                    downThreshold:
+                      type: number
+                      default: 0.2
+                ranger:
+                  type: object
+                  properties:
+                    serviceName:
+                      type: string
+                    strict:
+                      type: boolean
+                      default: true
+                quotasRef:
+                  type: object
+                  description: Optional reference to a ConfigMap containing the quotas JSON.
+                  properties:
+                    configMapName:
+                      type: string
+                    key:
+                      type: string
+                      default: quotas.json
+                env:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, value]
+                    properties:
+                      name: { type: string }
+                      value: { type: string }
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Reconciling, Ready, Degraded, Failed]
+                readyReplicas:
+                  type: integer
+                targetReplicas:
+                  type: integer
+                observedGeneration:
+                  type: integer
+                  format: int64
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type: { type: string }
+                      status: { type: string, enum: [True, False, Unknown] }
+                      reason: { type: string }
+                      message: { type: string }
+                      lastTransitionTime: { type: string, format: date-time }
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Target
+          type: integer
+          jsonPath: .status.targetReplicas
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      subresources:
+        status: {}

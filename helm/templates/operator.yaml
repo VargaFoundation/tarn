@@ -1,0 +1,91 @@
+{{- if .Values.operator.enabled -}}
+###
+# TARN Kubernetes operator — watches TritonDeployment CRs in the configured namespace(s)
+# and reconciles them into native Deployment + Service resources. Only deployed when
+# .Values.operator.enabled is true; the rest of the chart works standalone without it.
+###
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tarn.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tarn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tarn.fullname" . }}-operator
+  labels:
+    {{- include "tarn.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["tarn.varga.io"]
+    resources: ["tritondeployments", "tritondeployments/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tarn.fullname" . }}-operator
+  labels:
+    {{- include "tarn.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tarn.fullname" . }}-operator
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "tarn.fullname" . }}-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tarn.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tarn.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  # Single operator replica by default — the fabric8 watch doesn't dedupe across replicas,
+  # so running multiple without leader election causes duplicated reconciles.
+  replicas: {{ .Values.operator.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "tarn.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        {{- include "tarn.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: {{ include "tarn.fullname" . }}-operator
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag }}"
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy | default "IfNotPresent" }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: WATCH_NAMESPACE
+              value: {{ .Values.operator.watchNamespace | default "" | quote }}
+          resources:
+            {{- toYaml (.Values.operator.resources | default dict) | nindent 12 }}
+{{- end }}
