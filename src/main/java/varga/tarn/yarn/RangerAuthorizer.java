@@ -37,6 +37,8 @@ public class RangerAuthorizer {
     private RangerBasePlugin plugin;
     private RangerDefaultAuditHandler auditHandler;
     private final TarnConfig config;
+    // True when a plugin was requested (rangerService set) but initialization failed.
+    private volatile boolean initFailed = false;
 
     public RangerAuthorizer(TarnConfig config) {
         this.config = config;
@@ -51,8 +53,9 @@ public class RangerAuthorizer {
                     auditHandler = new RangerDefaultAuditHandler();
                 }
             } catch (Throwable e) {
-                log.error("Failed to initialize Apache Ranger plugin. Authorization will be disabled. Error: {}", e.getMessage(), e);
+                log.error("Failed to initialize Apache Ranger plugin. Error: {}", e.getMessage(), e);
                 plugin = null;
+                initFailed = true;
             }
         }
     }
@@ -61,9 +64,34 @@ public class RangerAuthorizer {
         return new RangerBasePlugin("triton", serviceName, appId);
     }
 
+    /**
+     * True when Ranger is either disabled (no service configured) or the plugin is up.
+     * When false, strict mode should deny every access and the AM should report UNHEALTHY.
+     */
+    public boolean isHealthy() {
+        return !initFailed;
+    }
+
+    /** True when the operator asked for Ranger but it's not working. */
+    public boolean isDegraded() {
+        return initFailed;
+    }
+
     public boolean isAllowed(String user, Set<String> groups, String action, String model) {
+        if (initFailed) {
+            // Fail-closed in strict mode — regulated clusters MUST not fall back to open.
+            if (config.rangerStrict) {
+                log.warn("Ranger in degraded state, DENY-by-default (strict): user={} action={} model={}",
+                        user, action, model);
+                return false;
+            }
+            log.warn("Ranger in degraded state, ALLOW (non-strict): user={} action={} model={}",
+                    user, action, model);
+            return true;
+        }
         if (plugin == null) {
-            return true; // If Ranger is not configured, allow by default (or we could default to deny if preferred)
+            // Ranger not configured — allow all (legacy behavior).
+            return true;
         }
 
         RangerAccessResourceImpl resource = new RangerAccessResourceImpl();

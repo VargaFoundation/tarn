@@ -116,4 +116,47 @@ public class RangerAuthorizerTest {
 
         verify(mockPlugin).isAccessAllowed(any(org.apache.ranger.plugin.policyengine.RangerAccessRequest.class), any(org.apache.ranger.plugin.policyengine.RangerAccessResultProcessor.class));
     }
+
+    /**
+     * When Ranger plugin init fails and strict mode is on, we MUST deny by default.
+     * Fail-open in a regulated cluster is a compliance bug; this test locks the behaviour in.
+     */
+    @Test
+    public void testStrictModeDeniesWhenPluginFailsToInit() {
+        TarnConfig config = new TarnConfig();
+        config.rangerService = "triton";
+        config.rangerStrict = true;
+
+        RangerAuthorizer authorizer = new RangerAuthorizer(config) {
+            @Override
+            protected RangerBasePlugin createPlugin(String serviceName, String appId) {
+                throw new RuntimeException("simulated Ranger admin unreachable");
+            }
+        };
+
+        assertTrue(authorizer.isDegraded(), "authorizer must know it is degraded");
+        assertFalse(authorizer.isHealthy());
+        assertFalse(authorizer.isAllowed("anyone", Collections.emptySet(), "infer", "any-model"),
+                "strict mode must deny-by-default when plugin failed");
+        assertFalse(authorizer.isAllowed("anyone", Collections.emptySet(), "list", "any-model"),
+                "strict mode must deny-by-default on list too");
+    }
+
+    @Test
+    public void testNonStrictModeAllowsWhenPluginFailsToInit() {
+        TarnConfig config = new TarnConfig();
+        config.rangerService = "triton";
+        config.rangerStrict = false;
+
+        RangerAuthorizer authorizer = new RangerAuthorizer(config) {
+            @Override
+            protected RangerBasePlugin createPlugin(String serviceName, String appId) {
+                throw new RuntimeException("simulated Ranger admin unreachable");
+            }
+        };
+
+        assertTrue(authorizer.isDegraded());
+        // Legacy behaviour preserved for non-regulated users who opt out.
+        assertTrue(authorizer.isAllowed("anyone", Collections.emptySet(), "infer", "any-model"));
+    }
 }

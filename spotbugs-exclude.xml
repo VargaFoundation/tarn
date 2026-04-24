@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- Generated FreeMarker templates, Lombok code, and test scaffolding are noisy. -->
+    <Match>
+        <Class name="~.*\.Generated.*" />
+    </Match>
+    <Match>
+        <Source name="~.*generated.*" />
+    </Match>
+    <!-- SLF4J format-string patterns trip the EI_EXPOSE_REP pattern without real risk. -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2" />
+    </Match>
+</FindBugsFilter>

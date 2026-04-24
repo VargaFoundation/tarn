@@ -24,7 +24,9 @@ package varga.tarn.yarn;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.net.InetAddress;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -37,8 +39,14 @@ import java.util.regex.Pattern;
 
 public class MetricsCollector {
     private static final Logger log = LoggerFactory.getLogger(MetricsCollector.class);
+    // Hostname syntax RFC 1123 + IPv4. Refuses `..`, scheme prefixes, `@`, spaces, etc.
+    private static final Pattern SAFE_HOST = Pattern.compile(
+            "^(?!.*\\.\\.)([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$");
+
     private final HttpClient httpClient;
     private final int metricsPort;
+    // Cached host resolution — refused hosts stay refused across fetches.
+    private final Map<String, Boolean> hostAllowCache = new ConcurrentHashMap<>();
 
     // Enriched metrics storage
     private final Map<String, List<Double>> inferenceLatencies = new ConcurrentHashMap<>();
@@ -213,7 +221,41 @@ public class MetricsCollector {
         return models;
     }
 
+    /**
+     * Validates a host string to prevent SSRF via loopback/link-local/metadata endpoints.
+     * Only public unicast / site-local addresses reachable by DNS (or literal IPv4) pass.
+     * Result is cached — YARN-provided NodeManager hostnames don't change mid-application.
+     */
+    public boolean isHostAllowed(String host) {
+        if (host == null || host.isEmpty() || host.length() > 253) return false;
+        Boolean cached = hostAllowCache.get(host);
+        if (cached != null) return cached;
+
+        boolean allowed = checkHostAllowed(host);
+        hostAllowCache.put(host, allowed);
+        if (!allowed) {
+            log.warn("Refusing to fetch from disallowed host (SSRF guard): {}", host);
+        }
+        return allowed;
+    }
+
+    private boolean checkHostAllowed(String host) {
+        if (!SAFE_HOST.matcher(host).matches()) return false;
+        try {
+            InetAddress addr = InetAddress.getByName(host);
+            // Block obvious SSRF targets: loopback, link-local (AWS/GCP metadata 169.254.x), any-local, multicast.
+            if (addr.isLoopbackAddress()) return false;
+            if (addr.isLinkLocalAddress()) return false;
+            if (addr.isAnyLocalAddress()) return false;
+            if (addr.isMulticastAddress()) return false;
+            return true;
+        } catch (UnknownHostException e) {
+            return false;
+        }
+    }
+
     public boolean isContainerReady(String host, int tritonPort) {
+        if (!isHostAllowed(host)) return false;
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("http://" + host + ":" + tritonPort + "/v2/health/ready"))
@@ -232,6 +274,7 @@ public class MetricsCollector {
     }
 
     public String fetchRawMetrics(String host) {
+        if (!isHostAllowed(host)) return "";
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("http://" + host + ":" + metricsPort + "/metrics"))
@@ -248,6 +291,7 @@ public class MetricsCollector {
     }
 
     public String fetchLoadedModels(String host, int tritonPort) {
+        if (!isHostAllowed(host)) return "[]";
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create("http://" + host + ":" + tritonPort + "/v2/repository/index"))

@@ -44,8 +44,28 @@ jobs:
       - name: Build with Maven
         run: ./mvnw clean package -DskipTests -B
 
-      - name: Run tests
+      - name: Run tests (with JaCoCo coverage)
         run: ./mvnw test -B
+
+      - name: Upload JaCoCo report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report
+          path: target/site/jacoco/
+          retention-days: 14
+
+      - name: SpotBugs static analysis
+        run: ./mvnw spotbugs:check -B
+        continue-on-error: true
+
+      - name: Upload SpotBugs report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotbugs-report
+          path: target/spotbugsXml.xml
+          retention-days: 14
 
       # --- Docker image ---
       - name: Set up Docker Buildx
@@ -68,6 +88,32 @@ jobs:
             type=ref,event=branch
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build Docker image (load locally for scan)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tarn:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan Docker image with Trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: 'tarn:scan'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-results.sarif
+          retention-days: 14
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6

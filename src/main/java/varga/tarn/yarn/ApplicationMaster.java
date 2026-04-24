@@ -22,6 +22,8 @@ package varga.tarn.yarn;
 
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.framework.state.ConnectionState;
+import org.apache.curator.framework.state.ConnectionStateListener;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
@@ -45,6 +47,12 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -71,6 +79,10 @@ public class ApplicationMaster {
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
     private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
+    private ScheduledExecutorService monitorExecutor;
+    private ScheduledExecutorService drainExecutor;
+    // Timeout used when blocking on ZK connect at startup.
+    private static final int ZK_CONNECT_TIMEOUT_SECONDS = 30;
 
     public ApplicationMaster() {
         this.conf = new YarnConfiguration();
@@ -97,24 +109,16 @@ public class ApplicationMaster {
         discoveryServer.start();
 
         rangerAuthorizer = new RangerAuthorizer(config);
-
-        // Initialize ZooKeeper client if ensemble is configured
-        if (config.zkEnsemble != null && !config.zkEnsemble.isEmpty()) {
-            log.info("Initializing ZooKeeper client with ensemble: {}", config.zkEnsemble);
-            zkClient = CuratorFrameworkFactory.newClient(config.zkEnsemble, new ExponentialBackoffRetry(1000, 3));
-            zkClient.start();
-            try {
-                zkClient.blockUntilConnected();
-                // Ensure base path exists
-                if (zkClient.checkExists().forPath(config.zkPath) == null) {
-                    zkClient.create().creatingParentsIfNeeded().forPath(config.zkPath);
-                }
-                log.info("ZooKeeper client initialized and base path ensured: {}", config.zkPath);
-            } catch (Exception e) {
-                log.error("Failed to initialize ZooKeeper client", e);
-                // We continue even if ZK fails, but log the error
+        if (rangerAuthorizer.isDegraded()) {
+            String msg = "Ranger plugin requested (service=" + config.rangerService + ") but initialization failed";
+            metricsCollector.recordAlert("ranger_degraded", msg,
+                    config.rangerStrict ? "critical" : "warning");
+            if (config.rangerStrict) {
+                throw new IllegalStateException(msg + " and --ranger-strict is set — refusing to start");
             }
         }
+
+        initZookeeper();
 
         // Initialize RM Client
         amRMClient = AMRMClientAsync.createAMRMClientAsync(1000, new RMCallbackHandler());
@@ -156,21 +160,107 @@ public class ApplicationMaster {
         // Initial request for Triton containers
         requestContainers();
 
-        // Main loop for monitoring and auto-scaling
-        while (!Thread.currentThread().isInterrupted()) {
-            try {
-                Thread.sleep(15000);
-                monitorMetricsAndScale();
-            } catch (InterruptedException e) {
-                log.info("AM interrupted, shutting down...");
-                break;
+        // Schedule the scaling loop instead of a tight Thread.sleep — interval is configurable
+        // and failure in one tick doesn't prevent the next from running.
+        long intervalMs = config.monitorIntervalMs > 0 ? config.monitorIntervalMs : 15000L;
+        monitorExecutor = Executors.newSingleThreadScheduledExecutor(daemonFactory("tarn-monitor"));
+        drainExecutor = Executors.newScheduledThreadPool(2, daemonFactory("tarn-drain"));
+        monitorExecutor.scheduleAtFixedRate(this::safeMonitorTick,
+                intervalMs, intervalMs, TimeUnit.MILLISECONDS);
+
+        // Block the main thread; monitor runs on its own executor.
+        try {
+            while (!Thread.currentThread().isInterrupted()) {
+                Thread.sleep(Long.MAX_VALUE);
             }
+        } catch (InterruptedException e) {
+            log.info("AM interrupted, shutting down...");
         }
 
         shutdown();
     }
 
+    private static ThreadFactory daemonFactory(String prefix) {
+        AtomicInteger count = new AtomicInteger();
+        return r -> {
+            Thread t = new Thread(r, prefix + "-" + count.incrementAndGet());
+            t.setDaemon(true);
+            return t;
+        };
+    }
+
+    private void safeMonitorTick() {
+        try {
+            monitorMetricsAndScale();
+        } catch (Throwable t) {
+            log.error("Monitor tick failed (will retry next interval)", t);
+        }
+    }
+
+    /**
+     * Initialize the Curator client, block up to ZK_CONNECT_TIMEOUT_SECONDS, and attach a
+     * connection state listener that re-registers ephemeral znodes on session reconnect so
+     * Knox does not lose track of live containers during a transient ZK outage.
+     */
+    private void initZookeeper() {
+        if (config.zkEnsemble == null || config.zkEnsemble.isEmpty()) {
+            return;
+        }
+        log.info("Initializing ZooKeeper client with ensemble: {}", config.zkEnsemble);
+        zkClient = CuratorFrameworkFactory.newClient(config.zkEnsemble, new ExponentialBackoffRetry(1000, 3));
+        zkClient.getConnectionStateListenable().addListener(newConnectionStateListener());
+        zkClient.start();
+
+        try {
+            if (!zkClient.blockUntilConnected(ZK_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                throw new TimeoutException("ZK connect timeout after " + ZK_CONNECT_TIMEOUT_SECONDS + "s");
+            }
+            if (zkClient.checkExists().forPath(config.zkPath) == null) {
+                zkClient.create().creatingParentsIfNeeded().forPath(config.zkPath);
+            }
+            log.info("ZooKeeper client initialized and base path ensured: {}", config.zkPath);
+        } catch (Exception e) {
+            metricsCollector.recordAlert("zk_init_failed",
+                    "ZooKeeper initialization failed: " + e.getMessage(),
+                    config.zkRequired ? "critical" : "warning");
+            if (config.zkRequired) {
+                throw new IllegalStateException(
+                        "ZooKeeper init failed and --zk-required is set — refusing to start", e);
+            }
+            log.warn("ZooKeeper init failed; continuing without registration (Knox discovery will be broken)", e);
+        }
+    }
+
+    private ConnectionStateListener newConnectionStateListener() {
+        return (client, newState) -> {
+            log.info("ZooKeeper connection state changed: {}", newState);
+            if (newState == ConnectionState.RECONNECTED) {
+                metricsCollector.recordAlert("zk_reconnected",
+                        "ZooKeeper session reconnected; re-registering " + runningContainers.size() + " container(s)",
+                        "info");
+                // Snapshot the list to avoid holding the lock during network I/O.
+                List<Container> snapshot;
+                synchronized (runningContainers) {
+                    snapshot = new ArrayList<>(runningContainers);
+                }
+                for (Container c : snapshot) {
+                    registerInZooKeeper(c);
+                }
+            } else if (newState == ConnectionState.LOST || newState == ConnectionState.SUSPENDED) {
+                metricsCollector.recordAlert("zk_connection_lost",
+                        "ZooKeeper connection " + newState,
+                        newState == ConnectionState.LOST ? "critical" : "warning");
+            }
+        };
+    }
+
     private void shutdown() throws Exception {
+        if (monitorExecutor != null) {
+            monitorExecutor.shutdownNow();
+        }
+        if (drainExecutor != null) {
+            drainExecutor.shutdownNow();
+        }
         if (amRMClient != null) {
             amRMClient.unregisterApplicationMaster(FinalApplicationStatus.SUCCEEDED, "Shutdown", "");
             amRMClient.stop();
@@ -246,27 +336,112 @@ public class ApplicationMaster {
     }
 
     private void stopExtraContainer() {
+        Container cToStop;
         synchronized (runningContainers) {
-            if (!runningContainers.isEmpty()) {
-                Container cToStop = runningContainers.get(0);
-                nmClient.stopContainerAsync(cToStop.getId(), cToStop.getNodeId());
-                // Note: removal from runningContainers happens in onContainersCompleted
-            }
+            if (runningContainers.isEmpty()) return;
+            // Prefer the least-loaded container for drain — minimizes disruption.
+            cToStop = pickContainerToDrain();
+        }
+        if (cToStop != null) {
+            gracefulStop(cToStop);
         }
     }
 
-    private double getAverageLoad() {
-        if (runningContainers.isEmpty()) return 0.0;
-
-        double totalLoad = 0;
-        int count = 0;
-        synchronized (runningContainers) {
-            for (Container c : runningContainers) {
-                totalLoad += metricsCollector.fetchContainerLoad(c.getNodeId().getHost());
-                count++;
+    private Container pickContainerToDrain() {
+        // Called under synchronized(runningContainers).
+        Container best = runningContainers.get(0);
+        int bestDepth = metricsCollector.getQueueDepth(best.getId().toString());
+        for (int i = 1; i < runningContainers.size(); i++) {
+            Container c = runningContainers.get(i);
+            int d = metricsCollector.getQueueDepth(c.getId().toString());
+            if (d < bestDepth) {
+                best = c;
+                bestDepth = d;
             }
         }
-        return count > 0 ? totalLoad / count : 0.0;
+        return best;
+    }
+
+    /**
+     * Remove the container from ZK first (so Knox and HAProxy stop routing to it),
+     * wait up to drainTimeoutMs for its queue to drain, then ask NM to stop it.
+     * Runs on the drainExecutor so the monitor loop is not blocked.
+     */
+    private void gracefulStop(Container container) {
+        if (drainExecutor == null || drainExecutor.isShutdown()) {
+            // Fallback to immediate stop if we haven't started the executor yet.
+            nmClient.stopContainerAsync(container.getId(), container.getNodeId());
+            return;
+        }
+        drainExecutor.submit(() -> {
+            String cid = container.getId().toString();
+            log.info("Draining container {} (timeout={}ms)", cid, config.drainTimeoutMs);
+            // 1. Deregister first so traffic stops arriving.
+            unregisterFromZooKeeper(container.getId());
+
+            // 2. Poll queue depth until 0 or timeout.
+            long deadline = System.currentTimeMillis() + config.drainTimeoutMs;
+            long pollMs = 500;
+            while (System.currentTimeMillis() < deadline) {
+                int depth = metricsCollector.getQueueDepth(cid);
+                if (depth <= 0) break;
+                try {
+                    Thread.sleep(pollMs);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+
+            int remaining = metricsCollector.getQueueDepth(cid);
+            if (remaining > 0) {
+                metricsCollector.recordAlert("drain_timeout",
+                        "Container " + cid + " still had " + remaining + " in-flight requests at drain timeout",
+                        "warning");
+            }
+
+            // 3. Tell NM to stop. Removal from runningContainers happens in onContainersCompleted.
+            nmClient.stopContainerAsync(container.getId(), container.getNodeId());
+        });
+    }
+
+    private double getAverageLoad() {
+        // Snapshot hosts under the lock; never do network I/O while holding it.
+        List<String> hosts;
+        synchronized (runningContainers) {
+            if (runningContainers.isEmpty()) return 0.0;
+            hosts = new ArrayList<>(runningContainers.size());
+            for (Container c : runningContainers) {
+                hosts.add(c.getNodeId().getHost());
+            }
+        }
+
+        List<CompletableFuture<Double>> futures = new ArrayList<>(hosts.size());
+        for (String host : hosts) {
+            futures.add(CompletableFuture.supplyAsync(
+                    () -> metricsCollector.fetchContainerLoad(host), monitorExecutor));
+        }
+
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
+                    .get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("Load fetch timed out or failed: {}", e.getMessage());
+            // Fall through: we'll still aggregate whatever completed.
+        }
+
+        double total = 0.0;
+        int count = 0;
+        for (CompletableFuture<Double> f : futures) {
+            if (!f.isDone() || f.isCompletedExceptionally()) continue;
+            try {
+                total += f.getNow(0.0);
+                count++;
+            } catch (Exception ignore) {
+                // Shouldn't happen since we checked isDone/exceptionally.
+            }
+        }
+        return count > 0 ? total / count : 0.0;
     }
 
     private void registerInZooKeeper(Container container) {

@@ -102,9 +102,10 @@ public class DiscoveryServerTest {
             assertEquals(200, resp2.statusCode());
             assertTrue(resp2.body().contains("host1:8000"));
 
-            // 3. Dashboard request
+            // 3. Dashboard request (header only — query-param tokens are refused for security).
             HttpRequest req3 = HttpRequest.newBuilder()
-                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/dashboard?token=test-token"))
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/dashboard"))
+                    .header("X-TARN-Token", "test-token")
                     .build();
             HttpResponse<String> resp3 = client.send(req3, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resp3.statusCode());
@@ -115,7 +116,8 @@ public class DiscoveryServerTest {
 
             // 4. Prometheus metrics request
             HttpRequest req4 = HttpRequest.newBuilder()
-                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/metrics?token=test-token"))
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/metrics"))
+                    .header("X-TARN-Token", "test-token")
                     .build();
             HttpResponse<String> resp4 = client.send(req4, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resp4.statusCode());
@@ -125,16 +127,21 @@ public class DiscoveryServerTest {
 
             // 5. Config request
             HttpRequest req5 = HttpRequest.newBuilder()
-                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/config?token=test-token"))
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/config"))
+                    .header("X-TARN-Token", "test-token")
                     .build();
             HttpResponse<String> resp5 = client.send(req5, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resp5.statusCode());
             assertTrue(resp5.body().contains("tritonPort: 8000"));
             assertTrue(resp5.body().contains("amPort:"));
+            // The raw token must never appear on the /config endpoint.
+            assertFalse(resp5.body().contains("test-token"));
+            assertTrue(resp5.body().contains("apiTokenSet: true"));
 
             // 6. Authorize request (Allowed)
             HttpRequest req6 = HttpRequest.newBuilder()
-                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/authorize?token=test-token&model=model1&action=infer"))
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/authorize?model=model1&action=infer"))
+                    .header("X-TARN-Token", "test-token")
                     .build();
             HttpResponse<String> resp6 = client.send(req6, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resp6.statusCode());
@@ -142,7 +149,8 @@ public class DiscoveryServerTest {
 
             // 7. Authorize request (Denied)
             HttpRequest req7 = HttpRequest.newBuilder()
-                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/authorize?token=test-token&model=model2&action=metadata"))
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/authorize?model=model2&action=metadata"))
+                    .header("X-TARN-Token", "test-token")
                     .build();
             HttpResponse<String> resp7 = client.send(req7, HttpResponse.BodyHandlers.ofString());
             assertEquals(200, resp7.statusCode());
@@ -152,6 +160,70 @@ public class DiscoveryServerTest {
             assertTrue(resp3.body().contains("model1"));
             assertFalse(resp3.body().contains("model2"));
 
+            // 9. Security: token in query-string MUST be rejected (prevents token leaks via access logs).
+            HttpRequest reqBadAuth1 = HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/instances?token=test-token"))
+                    .build();
+            HttpResponse<String> respBadAuth1 = client.send(reqBadAuth1, HttpResponse.BodyHandlers.ofString());
+            assertEquals(401, respBadAuth1.statusCode(), "query-string token must not authorize");
+
+            // 10. Security: wrong token returns 401 (length-independent — hashed compare).
+            HttpRequest reqWrong = HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/instances"))
+                    .header("X-TARN-Token", "wrong-token-with-different-length")
+                    .build();
+            assertEquals(401, client.send(reqWrong, HttpResponse.BodyHandlers.ofString()).statusCode());
+
+            // 11. URL decoding in authorize: %20 in model name resolves to space, consistent with Ranger.
+            when(mockAuthorizer.isAllowed(anyString(), anySet(), eq("metadata"), eq("my model"))).thenReturn(true);
+            HttpRequest reqDecode = HttpRequest.newBuilder()
+                    .uri(URI.create("http://127.0.0.1:" + actualPort + "/authorize?model=my%20model&action=metadata"))
+                    .header("X-TARN-Token", "test-token")
+                    .build();
+            HttpResponse<String> respDecode = client.send(reqDecode, HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, respDecode.statusCode());
+            assertEquals("true", respDecode.body());
+
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    public void testConfigRedactsSensitiveEnv() throws Exception {
+        TarnConfig config = new TarnConfig();
+        config.amPort = 0;
+        config.apiToken = "super-secret-token";
+        config.bindAddress = "127.0.0.1";
+        config.customEnv.put("PUBLIC_VAR", "visible-value");
+        config.customEnv.put("AWS_SECRET_KEY", "should-never-appear");
+        config.customEnv.put("HUGGING_FACE_TOKEN", "hf_abcdef");
+        config.customEnv.put("DB_PASSWORD", "hunter2");
+
+        ApplicationMaster mockAm = mock(ApplicationMaster.class);
+        when(mockAm.getRunningContainers()).thenReturn(new ArrayList<>());
+        when(mockAm.getAvailableModels()).thenReturn(new ArrayList<>());
+        when(mockAm.getMetricsCollector()).thenReturn(mock(MetricsCollector.class));
+        when(mockAm.getRangerAuthorizer()).thenReturn(mock(RangerAuthorizer.class));
+        when(mockAm.getAvailableResources())
+                .thenReturn(org.apache.hadoop.yarn.api.records.Resource.newInstance(0, 0));
+
+        DiscoveryServer server = new DiscoveryServer(config, mockAm);
+        server.start();
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            HttpResponse<String> resp = client.send(HttpRequest.newBuilder()
+                            .uri(URI.create("http://127.0.0.1:" + server.getPort() + "/config"))
+                            .header("X-TARN-Token", "super-secret-token").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, resp.statusCode());
+            String body = resp.body();
+            assertTrue(body.contains("PUBLIC_VAR=visible-value"));
+            assertFalse(body.contains("should-never-appear"));
+            assertFalse(body.contains("hf_abcdef"));
+            assertFalse(body.contains("hunter2"));
+            assertFalse(body.contains("super-secret-token"));
+            assertTrue(body.contains("***REDACTED***"));
         } finally {
             server.stop();
         }

@@ -63,4 +63,30 @@ public class MetricsCollectorTest {
         // if we were to expose the parsing part.
         // Actually I'll just run mvn test to see if everything compiles.
     }
+
+    @Test
+    public void testHostAllowlistRefusesLoopbackAndLinkLocal() {
+        MetricsCollector collector = new MetricsCollector(8002);
+        // Loopback is refused — otherwise SSRF to the AM itself or co-located admin services is trivial.
+        assertEquals(false, collector.isHostAllowed("127.0.0.1"));
+        assertEquals(false, collector.isHostAllowed("localhost"));
+        // AWS / GCP instance metadata endpoint lives on 169.254.169.254.
+        assertEquals(false, collector.isHostAllowed("169.254.169.254"));
+        // Any-local / multicast / malformed.
+        assertEquals(false, collector.isHostAllowed("0.0.0.0"));
+        assertEquals(false, collector.isHostAllowed(""));
+        assertEquals(false, collector.isHostAllowed(null));
+        // Shell-metacharacter injection attempts refused up-front.
+        assertEquals(false, collector.isHostAllowed("host;rm"));
+        assertEquals(false, collector.isHostAllowed("host with spaces"));
+    }
+
+    @Test
+    public void testFetchRefusesDisallowedHosts() {
+        MetricsCollector collector = new MetricsCollector(8002);
+        // fetchRawMetrics must short-circuit on disallowed hosts (no network attempt).
+        assertEquals("", collector.fetchRawMetrics("127.0.0.1"));
+        assertEquals("[]", collector.fetchLoadedModels("localhost", 8000));
+        assertEquals(false, collector.isContainerReady("169.254.169.254", 8000));
+    }
 }

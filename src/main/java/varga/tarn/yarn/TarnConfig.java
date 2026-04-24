@@ -52,6 +52,10 @@ public class TarnConfig {
     public String rangerService;
     public String rangerAppId;
     public boolean rangerAudit;
+    public boolean rangerStrict;
+    public boolean zkRequired;
+    public long drainTimeoutMs;
+    public long monitorIntervalMs;
     public Map<String, String> customEnv = new HashMap<>();
 
     // Client daemon port (health endpoint when running as foreground monitor)
@@ -90,6 +94,12 @@ public class TarnConfig {
         rangerService = getEnv("RANGER_SERVICE", null);
         rangerAppId = getEnv("RANGER_APP_ID", "tarn");
         rangerAudit = Boolean.parseBoolean(getEnv("RANGER_AUDIT", "true"));
+        // Default to strict mode when Ranger is configured: fail-closed if plugin init fails.
+        rangerStrict = Boolean.parseBoolean(getEnv("RANGER_STRICT", rangerService != null ? "true" : "false"));
+        // Default to required-ZK when an ensemble is configured.
+        zkRequired = Boolean.parseBoolean(getEnv("ZK_REQUIRED", zkEnsemble != null ? "true" : "false"));
+        drainTimeoutMs = Long.parseLong(getEnv("DRAIN_TIMEOUT_MS", "30000"));
+        monitorIntervalMs = Long.parseLong(getEnv("MONITOR_INTERVAL_MS", "15000"));
         clientPort = Integer.parseInt(getEnv("CLIENT_PORT", "8889"));
 
         scaleUpThreshold = Double.parseDouble(getEnv("SCALE_UP_THRESHOLD", "0.7"));
@@ -148,6 +158,29 @@ public class TarnConfig {
         if (line.hasOption("max-instances")) maxContainers = Integer.parseInt(line.getOptionValue("max-instances"));
         if (line.hasOption("cooldown")) scaleCooldownMs = Long.parseLong(line.getOptionValue("cooldown"));
         if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
+        if (line.hasOption("ranger-strict")) rangerStrict = true;
+        if (line.hasOption("zk-required")) zkRequired = true;
+        if (line.hasOption("drain-timeout-ms")) drainTimeoutMs = Long.parseLong(line.getOptionValue("drain-timeout-ms"));
+        if (line.hasOption("monitor-interval-ms")) monitorIntervalMs = Long.parseLong(line.getOptionValue("monitor-interval-ms"));
+
+        validate();
+    }
+
+    /**
+     * Fail-fast validation of user-supplied paths and numerics. Run after parseArgs to reject
+     * unsafe inputs before any command construction or YARN submission.
+     */
+    public void validate() {
+        TritonCommandBuilder.requireSafePath("model-repository", modelRepository);
+        TritonCommandBuilder.requireSafePath("secrets", secretsPath);
+        if (tritonPort <= 0 || tritonPort > 65535) throw new IllegalArgumentException("tritonPort out of range");
+        if (grpcPort <= 0 || grpcPort > 65535) throw new IllegalArgumentException("grpcPort out of range");
+        if (metricsPort <= 0 || metricsPort > 65535) throw new IllegalArgumentException("metricsPort out of range");
+        if (amPort <= 0 || amPort > 65535) throw new IllegalArgumentException("amPort out of range");
+        if (minContainers < 0) throw new IllegalArgumentException("minContainers < 0");
+        if (maxContainers < minContainers) throw new IllegalArgumentException("maxContainers < minContainers");
+        if (scaleUpThreshold <= 0 || scaleUpThreshold > 1.0) throw new IllegalArgumentException("scaleUpThreshold must be in (0, 1]");
+        if (scaleDownThreshold < 0 || scaleDownThreshold >= scaleUpThreshold) throw new IllegalArgumentException("scaleDownThreshold must be in [0, scaleUpThreshold)");
     }
 
     public static Options getOptions() {
@@ -174,6 +207,10 @@ public class TarnConfig {
         options.addOption("rs", "ranger-service", true, "Apache Ranger service name");
         options.addOption("ra", "ranger-app-id", true, "Apache Ranger App ID (default: tarn)");
         options.addOption("raudit", "ranger-audit", false, "Enable Apache Ranger auditing");
+        options.addOption(null, "ranger-strict", false, "Deny-by-default if Ranger plugin fails to initialize (recommended in regulated clusters)");
+        options.addOption(null, "zk-required", false, "Fail the AM if ZooKeeper is unreachable (recommended when Knox depends on ZK discovery)");
+        options.addOption(null, "drain-timeout-ms", true, "Max wait for in-flight inferences before stopping a container during scale-down (default 30000)");
+        options.addOption(null, "monitor-interval-ms", true, "Interval between scaling evaluations in ms (default 15000)");
         options.addOption("j", "jar", true, "Path to the application JAR (local, will be uploaded to HDFS)");
 
         Option envOption = new Option("e", "env", true, "Custom environment variables (KEY=VALUE)");

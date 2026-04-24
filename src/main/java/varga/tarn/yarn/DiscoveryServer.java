@@ -39,20 +39,36 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.StringWriter;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
+import java.util.regex.Pattern;
 
 public class DiscoveryServer {
     private static final Logger log = LoggerFactory.getLogger(DiscoveryServer.class);
+    // Redact env values whose key hints at a credential.
+    private static final Pattern SENSITIVE_ENV_KEY = Pattern.compile(
+            ".*(KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL|PASSPHRASE|AUTH).*",
+            Pattern.CASE_INSENSITIVE);
+    // Cap query-string length to avoid resource abuse via oversized params.
+    private static final int MAX_QUERY_LENGTH = 4096;
+
     private final HttpServer httpServer;
     private final ApplicationMaster am;
     private final TarnConfig config;
     private final Configuration freeMarkerConfig;
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, CircuitBreaker> healthCheckCircuitBreakers = new java.util.concurrent.ConcurrentHashMap<>();
+    // Pre-computed for constant-time compare. Null when auth is disabled.
+    private final byte[] apiTokenBytes;
 
     public DiscoveryServer(TarnConfig config, ApplicationMaster am) throws IOException {
         this.config = config;
         this.am = am;
+        this.apiTokenBytes = (config.apiToken != null && !config.apiToken.isEmpty())
+                ? config.apiToken.getBytes(StandardCharsets.UTF_8)
+                : null;
         this.httpServer = HttpServer.create(new InetSocketAddress(config.bindAddress, config.amPort), 0);
 
         // Initialize FreeMarker
@@ -88,36 +104,61 @@ public class DiscoveryServer {
     }
 
     private boolean isAuthorized(HttpExchange exchange) throws IOException {
-        if (config.apiToken != null && !config.apiToken.isEmpty()) {
-            String providedToken = exchange.getRequestHeaders().getFirst("X-TARN-Token");
-            // Also allow token in query param for easier dashboard access
-            if (providedToken == null) {
-                String query = exchange.getRequestURI().getQuery();
-                if (query != null && query.contains("token=" + config.apiToken)) {
-                    return true;
-                }
-            }
-            if (!config.apiToken.equals(providedToken)) {
-                log.warn("Unauthorized access attempt to {} from {}", exchange.getRequestURI().getPath(), exchange.getRemoteAddress());
-                exchange.sendResponseHeaders(401, -1);
-                return false;
-            }
+        if (apiTokenBytes == null) {
+            return true;
+        }
+        // Accept only the header. Query-string tokens leak via logs, referrers, and browser history.
+        String providedToken = exchange.getRequestHeaders().getFirst("X-TARN-Token");
+        if (providedToken == null || !constantTimeEquals(apiTokenBytes, providedToken.getBytes(StandardCharsets.UTF_8))) {
+            log.warn("Unauthorized access attempt to {} from {}",
+                    exchange.getRequestURI().getPath(), exchange.getRemoteAddress());
+            exchange.sendResponseHeaders(401, -1);
+            return false;
         }
         return true;
     }
 
+    /**
+     * Timing-attack-safe equality. Hashes both sides to a fixed-length digest so lengths can
+     * never leak through the compare, then uses MessageDigest.isEqual for the final check.
+     */
+    private static boolean constantTimeEquals(byte[] a, byte[] b) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            return MessageDigest.isEqual(md.digest(a), md.digest(b));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private Map<String, String> parseQueryParams(String query) {
         Map<String, String> params = new HashMap<>();
-        if (query != null) {
-            String[] pairs = query.split("&");
-            for (String pair : pairs) {
-                int idx = pair.indexOf("=");
-                if (idx > 0 && idx < pair.length() - 1) {
-                    params.put(pair.substring(0, idx), pair.substring(idx + 1));
-                }
-            }
+        if (query == null) return params;
+        if (query.length() > MAX_QUERY_LENGTH) {
+            log.warn("Query string too large ({} bytes), rejecting params", query.length());
+            return params;
+        }
+        for (String pair : query.split("&")) {
+            int idx = pair.indexOf('=');
+            if (idx <= 0 || idx >= pair.length() - 1) continue;
+            String key = urlDecode(pair.substring(0, idx));
+            String value = urlDecode(pair.substring(idx + 1));
+            params.put(key, value);
         }
         return params;
+    }
+
+    private static String urlDecode(String s) {
+        try {
+            return URLDecoder.decode(s, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return s;
+        }
+    }
+
+    private static String redactIfSensitive(String key, String value) {
+        if (key == null) return value;
+        return SENSITIVE_ENV_KEY.matcher(key).matches() ? "***REDACTED***" : value;
     }
 
     private String getRequestUser(HttpExchange exchange) {
@@ -354,6 +395,18 @@ public class DiscoveryServer {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             // No auth for health check typically, or same as metrics
+            // Ranger degraded = instant 503 : a regulated cluster must not serve traffic when
+            // authorization is unavailable.
+            RangerAuthorizer ra = am.getRangerAuthorizer();
+            if (ra != null && ra.isDegraded() && config.rangerStrict) {
+                String response = "RANGER_UNAVAILABLE";
+                exchange.sendResponseHeaders(503, response.length());
+                try (OutputStream os = exchange.getResponseBody()) {
+                    os.write(response.getBytes());
+                }
+                return;
+            }
+
             List<Container> containers = am.getRunningContainers();
             boolean atLeastOneReady = false;
             synchronized (containers) {
@@ -361,12 +414,12 @@ public class DiscoveryServer {
                     String host = c.getNodeId().getHost();
                     CircuitBreaker cb = healthCheckCircuitBreakers.computeIfAbsent(
                             host, k -> CircuitBreaker.forHealthCheck(k));
-                    
+
                     if (!cb.allowRequest()) {
                         log.debug("Circuit breaker OPEN for host {}, skipping health check", host);
                         continue;
                     }
-                    
+
                     try {
                         boolean ready = am.getMetricsCollector().isContainerReady(host, config.tritonPort);
                         if (ready) {
@@ -429,9 +482,13 @@ public class DiscoveryServer {
             if (!config.customEnv.isEmpty()) {
                 sb.append("\nCustom Environment:\n");
                 for (Map.Entry<String, String> entry : config.customEnv.entrySet()) {
-                    sb.append("  ").append(entry.getKey()).append("=").append(entry.getValue()).append("\n");
+                    sb.append("  ").append(entry.getKey())
+                            .append("=").append(redactIfSensitive(entry.getKey(), entry.getValue()))
+                            .append("\n");
                 }
             }
+            // Never expose the API token itself, even though the endpoint is auth-protected.
+            sb.append("\napiTokenSet: ").append(config.apiToken != null && !config.apiToken.isEmpty()).append("\n");
 
             String response = sb.toString();
             exchange.getResponseHeaders().set("Content-Type", "text/plain");

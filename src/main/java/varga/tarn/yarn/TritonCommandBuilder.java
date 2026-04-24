@@ -9,9 +9,9 @@ package varga.tarn.yarn;
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *      http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,7 +21,13 @@ package varga.tarn.yarn;
  */
 
 
+import java.util.regex.Pattern;
+
 public class TritonCommandBuilder {
+    // Rejects any shell metacharacter. Paths must start with hdfs:// or /.
+    private static final Pattern UNSAFE_PATH_CHARS = Pattern.compile("[\\s;&|`$()<>\"'\\\\*?]");
+    private static final Pattern SAFE_BIND_ADDRESS = Pattern.compile("^[a-zA-Z0-9.\\-:]+$");
+
     private String modelRepository;
     private int httpPort = 8000;
     private int grpcPort = 8001;
@@ -31,7 +37,20 @@ public class TritonCommandBuilder {
     private int pp = 1;
     private String secretsPath;
 
+    public static void requireSafePath(String label, String value) {
+        if (value == null || value.isEmpty()) return;
+        if (UNSAFE_PATH_CHARS.matcher(value).find()) {
+            throw new IllegalArgumentException(
+                    "Invalid " + label + ": contains unsafe shell characters (" + value + ")");
+        }
+        if (!value.startsWith("hdfs://") && !value.startsWith("/")) {
+            throw new IllegalArgumentException(
+                    "Invalid " + label + ": must start with 'hdfs://' or '/' (" + value + ")");
+        }
+    }
+
     public TritonCommandBuilder modelRepository(String modelRepository) {
+        requireSafePath("model-repository", modelRepository);
         this.modelRepository = modelRepository;
         return this;
     }
@@ -52,6 +71,10 @@ public class TritonCommandBuilder {
     }
 
     public TritonCommandBuilder bindAddress(String bindAddress) {
+        if (bindAddress != null && !SAFE_BIND_ADDRESS.matcher(bindAddress).matches()) {
+            throw new IllegalArgumentException(
+                    "Invalid bind-address: only alphanumerics, dot, dash and colon allowed (" + bindAddress + ")");
+        }
         this.bindAddress = bindAddress;
         return this;
     }
@@ -67,17 +90,22 @@ public class TritonCommandBuilder {
     }
 
     public TritonCommandBuilder secretsPath(String secretsPath) {
+        requireSafePath("secrets", secretsPath);
         this.secretsPath = secretsPath;
         return this;
     }
 
     public String build() {
+        // Defense-in-depth: re-validate in case fields were set reflectively or via no-arg ctor.
+        requireSafePath("model-repository", modelRepository);
+        requireSafePath("secrets", secretsPath);
+
         StringBuilder sb = new StringBuilder();
         String localModelPath = "/models";
 
         // Pre-loading logic
         if (modelRepository != null && !modelRepository.isEmpty()) {
-            if (modelRepository.startsWith("hdfs:///")) {
+            if (modelRepository.startsWith("hdfs://")) {
                 sb.append("mkdir -p ").append(localModelPath).append(" && ");
                 sb.append("hadoop fs -copyToLocal ").append(modelRepository).append("/* ").append(localModelPath).append(" && ");
             } else if (modelRepository.startsWith("/")) {
