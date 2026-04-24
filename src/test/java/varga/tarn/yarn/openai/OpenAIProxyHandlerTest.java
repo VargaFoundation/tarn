@@ -253,6 +253,47 @@ public class OpenAIProxyHandlerTest {
     }
 
     @Test
+    public void usageCallbackAccountsTokensForStreamingClients() throws Exception {
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/usage")))
+                        .header("Content-Type", "application/json")
+                        .header("X-Forwarded-User", "bob")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"model\":\"llama-3-70b\",\"prompt_tokens\":100,\"completion_tokens\":250}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, resp.statusCode());
+        assertEquals(100L, (long) metrics.getTokensIn().get("bob|llama-3-70b"));
+        assertEquals(250L, (long) metrics.getTokensOut().get("bob|llama-3-70b"));
+    }
+
+    @Test
+    public void usageCallbackRejectsMalformed() throws Exception {
+        // Missing model
+        HttpResponse<String> r1 = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/usage")))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString("{\"prompt_tokens\":1}")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, r1.statusCode());
+
+        // Negative tokens
+        HttpResponse<String> r2 = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/usage")))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"model\":\"m\",\"prompt_tokens\":-5}")).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, r2.statusCode());
+
+        // GET is 405
+        HttpResponse<String> r3 = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/usage"))).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(405, r3.statusCode());
+    }
+
+    @Test
     public void tokenUsageFromResponseIsAccounted() throws Exception {
         // Replace fake Triton handler with one that returns an OpenAI usage block.
         fakeTriton.removeContext("/v1/chat/completions");

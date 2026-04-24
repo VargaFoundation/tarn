@@ -104,6 +104,10 @@ public class OpenAIProxyHandler implements HttpHandler {
                 handleInferenceProxy(ex);
                 return;
             }
+            if (path.endsWith("/usage") || path.endsWith("/v1/usage")) {
+                handleUsageReport(ex);
+                return;
+            }
             writeJsonError(ex, 404, "not_found", "Unknown endpoint: " + path);
         } catch (Exception e) {
             log.error("Proxy handler failed", e);
@@ -309,6 +313,66 @@ public class OpenAIProxyHandler implements HttpHandler {
             mc.recordInferenceLatency(baseModel, latencyMs);
             upstreamSpan.end();
         }
+    }
+
+    /**
+     * Out-of-band usage reporter for streaming completions. Streaming responses don't give us
+     * a reliable in-band hook to extract the final {@code usage} block (parsing SSE chunks in
+     * flight would either block the response or risk dropping bytes). Clients or the Triton
+     * {@code openai_frontend} can POST their token counts here after each stream:
+     *
+     * <pre>{@code
+     * POST /v1/usage
+     * X-Forwarded-User: alice
+     * {
+     *   "model": "llama-3-70b",
+     *   "prompt_tokens": 42,
+     *   "completion_tokens": 128
+     * }
+     * }</pre>
+     */
+    private void handleUsageReport(HttpExchange ex) throws IOException {
+        if (!"POST".equalsIgnoreCase(ex.getRequestMethod())) {
+            writeJsonError(ex, 405, "method_not_allowed", "Use POST");
+            return;
+        }
+        byte[] body;
+        try (InputStream is = ex.getRequestBody()) {
+            body = is.readNBytes(16 * 1024);
+        }
+        if (body.length == 0) {
+            writeJsonError(ex, 400, "empty_body", "POST body required");
+            return;
+        }
+        com.fasterxml.jackson.databind.JsonNode root;
+        try {
+            root = om.readTree(body);
+        } catch (Exception e) {
+            writeJsonError(ex, 400, "invalid_json", "body must be a JSON object");
+            return;
+        }
+        String model = root.path("model").asText(null);
+        if (model == null || model.isEmpty()) {
+            writeJsonError(ex, 400, "missing_model", "'model' field required");
+            return;
+        }
+        long prompt = root.path("prompt_tokens").asLong(0);
+        long completion = root.path("completion_tokens").asLong(0);
+        if (prompt < 0 || completion < 0) {
+            writeJsonError(ex, 400, "invalid_tokens", "token counts must be non-negative");
+            return;
+        }
+        // Trust the caller's claimed user only if they come in through a proxy that sets it.
+        // Otherwise fall back to the authenticated principal.
+        String user = getUser(ex);
+        am.getMetricsCollector().recordTokens(user, model, prompt, completion);
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("recorded", true);
+        resp.put("user", user);
+        resp.put("model", model);
+        resp.put("prompt_tokens", prompt);
+        resp.put("completion_tokens", completion);
+        writeJson(ex, 200, resp);
     }
 
     /**

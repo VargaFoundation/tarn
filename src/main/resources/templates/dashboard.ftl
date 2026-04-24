@@ -97,6 +97,46 @@
             </div>
         </section>
 
+        <#if (topTokenConsumers?? && topTokenConsumers?size > 0)>
+        <section class="bg-dark-card rounded-lg border border-dark-border shadow-md overflow-hidden mb-8">
+            <h2 class="text-xl font-semibold p-6 bg-black bg-opacity-10 border-b border-dark-border">Top Token Consumers <span class="text-sm font-normal text-gray-500 ml-2">(chargeback)</span></h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse">
+                    <thead>
+                        <tr class="bg-dark-border text-gray-400 uppercase text-xs">
+                            <th class="p-3">User</th>
+                            <th class="p-3">Model</th>
+                            <th class="p-3 text-right">Prompt tokens</th>
+                            <th class="p-3 text-right">Completion tokens</th>
+                            <th class="p-3 text-right">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-dark-border">
+                        <#list topTokenConsumers as row>
+                        <tr class="hover:bg-black hover:bg-opacity-20 transition-colors">
+                            <td class="p-3 font-mono text-xs">${row.user}</td>
+                            <td class="p-3 font-mono text-xs">${row.model}</td>
+                            <td class="p-3 text-right font-mono">${row.tokensIn?c}</td>
+                            <td class="p-3 text-right font-mono">${row.tokensOut?c}</td>
+                            <td class="p-3 text-right font-mono text-dark-accent">${row.total?c}</td>
+                        </tr>
+                        </#list>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+        </#if>
+
+        <#if (quotasJson?? && (quotaRuleCount!0) > 0)>
+        <section class="bg-dark-card rounded-lg border border-dark-border shadow-md overflow-hidden mb-8">
+            <h2 class="text-xl font-semibold p-6 bg-black bg-opacity-10 border-b border-dark-border">Active Quota Rules <span class="text-sm font-normal text-gray-500 ml-2">(${quotaRuleCount} rule<#if quotaRuleCount != 1>s</#if> loaded)</span></h2>
+            <div class="p-6">
+                <pre class="bg-black bg-opacity-30 rounded p-4 text-xs overflow-x-auto text-gray-300">${quotasJson}</pre>
+                <p class="text-xs text-gray-500 mt-2">Update via <code class="bg-dark-border px-1 rounded">POST /admin/quotas</code> (propagated through ZooKeeper) or <code class="bg-dark-border px-1 rounded">zkCli.sh set /services/triton/config/quotas</code>.</p>
+            </div>
+        </section>
+        </#if>
+
         <section class="bg-dark-card rounded-lg border border-dark-border shadow-md overflow-hidden mb-8">
             <h2 class="text-xl font-semibold p-6 bg-black bg-opacity-10 border-b border-dark-border">Running Containers</h2>
             <div class="overflow-x-auto">

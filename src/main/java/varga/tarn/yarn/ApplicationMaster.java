@@ -973,6 +973,33 @@ public class ApplicationMaster {
     }
 
     /**
+     * Writes a new quota JSON to the shared ZK config znode so every AM replica picks it up
+     * through its {@link NodeCache} listener. This is the multi-replica write path used by the
+     * admin endpoint; a pure-local reload happens on a subsequent NodeCache event.
+     */
+    public boolean publishQuotasToZk(String json) {
+        if (zkClient == null) {
+            // Single-instance fallback: apply locally so the operator sees the effect even
+            // when ZK isn't configured.
+            quotaEnforcer.loadFromJson(json);
+            return false;
+        }
+        try {
+            String path = configRootPath() + "/quotas";
+            if (zkClient.checkExists().forPath(path) == null) {
+                zkClient.create().creatingParentsIfNeeded().forPath(path);
+            }
+            zkClient.setData().forPath(path, json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return true;
+        } catch (Exception e) {
+            log.error("Failed to publish quotas to ZK: {}", e.getMessage());
+            // Degrade gracefully: apply locally even if ZK write failed.
+            quotaEnforcer.loadFromJson(json);
+            return false;
+        }
+    }
+
+    /**
      * Reads the quota JSON file from HDFS (or local) and replaces the in-memory rule set.
      * Called on startup and again by the hot-reload watcher (P2.8).
      */

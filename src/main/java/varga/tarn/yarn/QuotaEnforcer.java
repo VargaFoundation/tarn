@@ -118,9 +118,20 @@ public class QuotaEnforcer {
 
     // Snapshot of rules; replaced atomically on reload. volatile so writes publish visibly.
     private volatile List<Rule> rules = new ArrayList<>();
+    // Last JSON blob loaded — exposed via /admin/quotas GET so operators can inspect the
+    // live policy before pushing an update.
+    private volatile String lastLoadedJson = "{\"rules\":[]}";
     // Token buckets keyed by "user|model" for rules that match on user, or "group|..." etc.
     // Buckets are lazily created per-caller when first hit.
     private final Map<String, TokenBucket> buckets = new ConcurrentHashMap<>();
+
+    public String getCurrentRulesJson() {
+        return lastLoadedJson;
+    }
+
+    public int getRuleCount() {
+        return rules.size();
+    }
 
     public void loadFromJson(String json) {
         try {
@@ -141,6 +152,7 @@ public class QuotaEnforcer {
             parsed.sort((a, b) -> Integer.compare(b.specificity(), a.specificity()));
             this.rules = parsed;
             this.buckets.clear(); // New rules invalidate old buckets.
+            this.lastLoadedJson = json == null ? "{\"rules\":[]}" : json;
             log.info("Loaded {} quota rule(s)", parsed.size());
         } catch (Exception e) {
             log.error("Failed to parse quotas JSON: {}", e.getMessage());
@@ -153,6 +165,7 @@ public class QuotaEnforcer {
         list.add(new Rule(null, null, "*", requestsPerMinute));
         this.rules = list;
         this.buckets.clear();
+        this.lastLoadedJson = "{\"rules\":[{\"model\":\"*\",\"requestsPerMinute\":" + requestsPerMinute + "}]}";
     }
 
     public Decision check(String user, Set<String> groups, String model) {

@@ -2,6 +2,85 @@
 
 TARN is a scalable inference solution for running NVIDIA Triton Inference Server on a Hadoop/YARN cluster using Docker containers.
 
+## What's new
+
+This release adds market-parity LLM features, hardens the security posture, and closes several
+audit gaps. Features are opt-in — existing deployments continue to work with the same CLI.
+
+### LLM serving
+- **OpenAI-compatible proxy** on a dedicated port (`--openai-proxy-enabled --openai-proxy-port 9000`).
+  Exposes `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`. Streaming
+  SSE relayed byte-for-byte, least-loaded routing via Triton queue depth.
+- **Multi-LoRA routing**: drop a `lora.json` at the root of your model repository
+  (`{"base_model": ["adapter1", "adapter2"]}`); clients pass `model: "base_model#adapter1"`.
+  Ranger policies can target `base#lora` as a discrete resource.
+- **Token chargeback**: per-(user, model) counters in `/metrics` (`tarn_tokens_in_total`,
+  `tarn_tokens_out_total`). Non-streaming responses are accounted automatically; streaming
+  clients can POST to `/v1/usage` to report their counts out-of-band.
+- **Queue-aware scaling**: `--scale-mode=composite` (default) combines GPU utilization with
+  per-container queue depth so LLM workloads (GPU pinned at 100% by design) still scale
+  correctly. Legacy `--scale-mode=gpu_util` preserved.
+- **Model warmup**: ZK registration is deferred until `/v2/health/ready` passes, so Knox
+  never routes to a cold backend (`--warmup-timeout-ms`, default 120s).
+
+### Security
+- **TLS**: `--tls-enabled --tls-keystore hdfs:///tarn/certs/keystore.jks`. Password read via
+  Hadoop credential provider alias (default `tarn.tls.keystore.password`). TLS 1.2/1.3 only,
+  HSTS header when TLS is active. Applies to both the admin and OpenAI ports.
+- **Token comparison** is now constant-time (SHA-256 + `MessageDigest.isEqual`); query-string
+  tokens (`?token=...`) are refused. Use the `X-TARN-Token` header.
+- **Shell injection** in `--model-repository` / `--secrets` closed: all paths are validated
+  against a strict allowlist before entering the launch command (`TritonCommandBuilder`).
+- **SSRF guard**: the metrics scraper refuses loopback, link-local, and metadata endpoints.
+- **Ranger fail-closed**: `--ranger-strict` (default-on when `--ranger-service` is set)
+  refuses inference if the Ranger plugin can't initialize, and marks the AM unhealthy.
+- **Inference-level Ranger enforcement** on the OpenAI proxy. Client IP is propagated to
+  Ranger audit (via `X-Forwarded-For` when behind Knox/ingress).
+- **Secrets redacted** on `/config` (regex on `KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL`).
+- **Security response headers**: HSTS, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
+
+### Multi-tenancy & operations
+- **Quotas & rate limiting**: per-(user, model) token buckets. JSON rules, first-match with
+  specificity precedence (`--quotas hdfs:///tarn/quotas.json`). Exceeded requests return
+  `429` with `Retry-After`.
+- **Hot-reload via ZooKeeper**: write new quota JSON to the shared znode
+  `/services/triton/config/quotas` — every AM replica reloads within one Curator event.
+- **Admin REST API**: `GET /admin/quotas` to inspect live rules, `POST /admin/quotas` to
+  update them (body is propagated through ZK). Auth via the admin token.
+- **Graceful drain on scale-down**: the AM deregisters a container from ZK first, waits for
+  its queue to drain (up to `--drain-timeout-ms`, default 30s), then issues SIGTERM — no
+  in-flight requests are dropped.
+- **Non-NVIDIA accelerators**: `--accelerator-type {nvidia_gpu|amd_gpu|intel_gaudi|aws_neuron|cpu_only}`.
+  The matching YARN resource (`amd.com/gpu`, `habana.ai/gaudi`, …) is requested automatically.
+- **MIG / GPU slice**: `--gpu-slice-size 1g.10gb` or decimal fractions for MPS.
+
+### Observability
+- **Native Prometheus histograms** for inference latency (`tarn_inference_latency_seconds`),
+  aggregatable across replicas via `histogram_quantile()`.
+- **Request counters** split by outcome: `tarn_inference_requests_total{model,status="success|error"}`.
+- **OpenTelemetry tracing** (API-only, agent-activated): SERVER span per proxy request,
+  CLIENT span for the upstream Triton call, W3C `traceparent` propagation, MDC push of
+  `trace_id`/`span_id` for log correlation.
+- **Structured JSON logs** via `TarnJsonLayout` (activate with
+  `-Dlog4j.configuration=log4j-json.properties`).
+- **Enriched dashboard**: top-N token consumers, active quota rules, LoRA adapters, shadow
+  traffic metrics.
+
+### Deployment
+- **Production-grade Helm chart**: Ingress, ServiceMonitor (Prometheus Operator),
+  NetworkPolicy, PodDisruptionBudget, non-root SecurityContext, readiness/liveness probes.
+- **Shadow traffic**: `--shadow-endpoint http://triton-v2:8000 --shadow-sample-rate 0.01`
+  mirrors a fraction of requests asynchronously for A/B comparison; responses discarded,
+  metrics recorded under the `shadow:<model>` label.
+
+### CI / quality
+- 111 tests (vs. ~35 at baseline), JaCoCo 52%+ coverage, SpotBugs + OWASP Dependency-Check +
+  Trivy (Docker scan) configured. Integration tests against an embedded ZooKeeper via
+  Curator `TestingServer`.
+
+See the [Plan file](./SPEC.md) and the per-flag documentation below.
+
 ## Architecture
 
 ```mermaid

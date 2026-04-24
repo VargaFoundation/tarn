@@ -190,6 +190,91 @@ public class DiscoveryServerTest {
     }
 
     @Test
+    public void testAdminQuotasGetAndPost() throws Exception {
+        TarnConfig config = new TarnConfig();
+        config.amPort = 0;
+        config.apiToken = "admin-token";
+        config.bindAddress = "127.0.0.1";
+
+        ApplicationMaster mockAm = mock(ApplicationMaster.class);
+        when(mockAm.getRunningContainers()).thenReturn(new ArrayList<>());
+        when(mockAm.getAvailableModels()).thenReturn(new ArrayList<>());
+        when(mockAm.getMetricsCollector()).thenReturn(mock(MetricsCollector.class));
+        when(mockAm.getRangerAuthorizer()).thenReturn(mock(RangerAuthorizer.class));
+        when(mockAm.getAvailableResources())
+                .thenReturn(org.apache.hadoop.yarn.api.records.Resource.newInstance(0, 0));
+
+        // Real QuotaEnforcer so the admin endpoint's GET reflects state changes.
+        varga.tarn.yarn.QuotaEnforcer qe = new varga.tarn.yarn.QuotaEnforcer();
+        when(mockAm.getQuotaEnforcer()).thenReturn(qe);
+        // Simulate a no-ZK cluster — publishQuotasToZk falls back to local apply.
+        when(mockAm.publishQuotasToZk(org.mockito.ArgumentMatchers.anyString()))
+                .thenAnswer(inv -> {
+                    qe.loadFromJson(inv.getArgument(0));
+                    return false; // "applied locally"
+                });
+
+        DiscoveryServer server = new DiscoveryServer(config, mockAm);
+        server.start();
+        try {
+            HttpClient client = HttpClient.newHttpClient();
+            String baseUrl = "http://127.0.0.1:" + server.getPort() + "/admin/quotas";
+
+            // GET returns the default empty policy.
+            HttpResponse<String> get1 = client.send(HttpRequest.newBuilder()
+                            .uri(URI.create(baseUrl))
+                            .header("X-TARN-Token", "admin-token").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, get1.statusCode());
+            assertTrue(get1.body().contains("rules"));
+
+            // POST without the token is rejected (admin is privileged).
+            HttpResponse<String> unauth = client.send(HttpRequest.newBuilder()
+                            .uri(URI.create(baseUrl))
+                            .POST(HttpRequest.BodyPublishers.ofString("{}")).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(401, unauth.statusCode());
+
+            // POST with invalid JSON returns 400, doesn't touch the enforcer.
+            HttpResponse<String> bad = client.send(HttpRequest.newBuilder()
+                            .uri(URI.create(baseUrl))
+                            .header("X-TARN-Token", "admin-token")
+                            .POST(HttpRequest.BodyPublishers.ofString("not json")).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(400, bad.statusCode());
+
+            // POST with valid rules propagates.
+            String rules = "{\"rules\":[{\"user\":\"alice\",\"model\":\"llama-3-70b\",\"requestsPerMinute\":5}]}";
+            HttpResponse<String> post = client.send(HttpRequest.newBuilder()
+                            .uri(URI.create(baseUrl))
+                            .header("X-TARN-Token", "admin-token")
+                            .POST(HttpRequest.BodyPublishers.ofString(rules)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, post.statusCode());
+
+            // Subsequent GET reflects the new rule set.
+            HttpResponse<String> get2 = client.send(HttpRequest.newBuilder()
+                            .uri(URI.create(baseUrl))
+                            .header("X-TARN-Token", "admin-token").build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, get2.statusCode());
+            assertTrue(get2.body().contains("alice"));
+            assertTrue(get2.body().contains("llama-3-70b"));
+
+            // DELETE isn't allowed — 405 with the correct Allow header.
+            HttpResponse<String> del = client.send(HttpRequest.newBuilder()
+                            .uri(URI.create(baseUrl))
+                            .header("X-TARN-Token", "admin-token")
+                            .method("DELETE", HttpRequest.BodyPublishers.noBody()).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(405, del.statusCode());
+            assertTrue(del.headers().firstValue("Allow").isPresent());
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
     public void testConfigRedactsSensitiveEnv() throws Exception {
         TarnConfig config = new TarnConfig();
         config.amPort = 0;

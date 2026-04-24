@@ -113,6 +113,7 @@ public class DiscoveryServer {
         createSecuredContext("/config", new ConfigHandler(), securityHeaders);
         createSecuredContext("/authorize", new AuthorizeHandler(), securityHeaders);
         createSecuredContext("/alerts", new AlertsHandler(), securityHeaders);
+        createSecuredContext("/admin/quotas", new QuotaAdminHandler(), securityHeaders);
         this.httpServer.setExecutor(null);
     }
 
@@ -325,6 +326,39 @@ public class DiscoveryServer {
                 }
             }
             model.put("loraAdapters", authorizedLoras);
+
+            // Active quota rules (pretty-printed JSON) so operators can diff against policy git.
+            QuotaEnforcer qe = am.getQuotaEnforcer();
+            if (qe != null) {
+                model.put("quotasJson", qe.getCurrentRulesJson());
+                model.put("quotaRuleCount", qe.getRuleCount());
+            }
+
+            // Top-N token consumers for chargeback visibility. Sorted desc on total tokens.
+            MetricsCollector mc = am.getMetricsCollector();
+            if (mc != null) {
+                java.util.Map<String, Long> inMap = mc.getTokensIn();
+                java.util.Map<String, Long> outMap = mc.getTokensOut();
+                java.util.Set<String> keys = new java.util.HashSet<>();
+                keys.addAll(inMap.keySet());
+                keys.addAll(outMap.keySet());
+                List<Map<String, Object>> rows = new ArrayList<>(keys.size());
+                for (String k : keys) {
+                    String[] um = k.split("\\|", 2);
+                    long in = inMap.getOrDefault(k, 0L);
+                    long out = outMap.getOrDefault(k, 0L);
+                    Map<String, Object> row = new java.util.LinkedHashMap<>();
+                    row.put("user", um.length > 0 ? um[0] : "unknown");
+                    row.put("model", um.length > 1 ? um[1] : "unknown");
+                    row.put("tokensIn", in);
+                    row.put("tokensOut", out);
+                    row.put("total", in + out);
+                    rows.add(row);
+                }
+                rows.sort((a, b) -> Long.compare((long) b.get("total"), (long) a.get("total")));
+                if (rows.size() > 10) rows = rows.subList(0, 10);
+                model.put("topTokenConsumers", rows);
+            }
 
             // Samples for models
             if (!containers.isEmpty()) {
@@ -653,6 +687,69 @@ public class DiscoveryServer {
                 os.write(response.getBytes());
             }
         }
+    }
+
+    private class QuotaAdminHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!isAuthorized(exchange)) return;
+
+            String method = exchange.getRequestMethod();
+            QuotaEnforcer qe = am.getQuotaEnforcer();
+            if (qe == null) {
+                exchange.sendResponseHeaders(503, -1);
+                return;
+            }
+
+            if ("GET".equalsIgnoreCase(method)) {
+                String json = qe.getCurrentRulesJson();
+                byte[] out = json == null ? "{\"rules\":[]}".getBytes() : json.getBytes();
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, out.length);
+                try (OutputStream os = exchange.getResponseBody()) { os.write(out); }
+                return;
+            }
+
+            if ("POST".equalsIgnoreCase(method) || "PUT".equalsIgnoreCase(method)) {
+                // Cap body size to prevent a trivial DoS via oversized payload.
+                byte[] body;
+                try (var in = exchange.getRequestBody()) {
+                    body = in.readNBytes(256 * 1024);
+                }
+                if (body.length == 0) {
+                    writeTextError(exchange, 400, "empty body");
+                    return;
+                }
+                String json = new String(body, java.nio.charset.StandardCharsets.UTF_8);
+                // Validate syntactically BEFORE publishing to ZK — avoid propagating a corrupt
+                // blob that every replica would then fail to parse.
+                try {
+                    objectMapper.readTree(json);
+                } catch (Exception e) {
+                    writeTextError(exchange, 400, "invalid JSON: " + e.getMessage());
+                    return;
+                }
+                boolean viaZk = am.publishQuotasToZk(json);
+                String response = viaZk
+                        ? "published to ZooKeeper (will propagate to all AM replicas)\n"
+                        : "applied locally (ZK unavailable or not configured)\n";
+                byte[] out = response.getBytes();
+                exchange.getResponseHeaders().set("Content-Type", "text/plain");
+                exchange.sendResponseHeaders(200, out.length);
+                try (OutputStream os = exchange.getResponseBody()) { os.write(out); }
+                return;
+            }
+
+            exchange.getResponseHeaders().set("Allow", "GET, POST, PUT");
+            exchange.sendResponseHeaders(405, -1);
+        }
+    }
+
+    private static void writeTextError(HttpExchange ex, int code, String msg) throws IOException {
+        byte[] out = msg.getBytes();
+        ex.getResponseHeaders().set("Content-Type", "text/plain");
+        ex.sendResponseHeaders(code, out.length);
+        try (OutputStream os = ex.getResponseBody()) { os.write(out); }
     }
 
     private class AlertsHandler implements HttpHandler {
