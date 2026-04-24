@@ -143,6 +143,56 @@ spec:
                     properties:
                       name: { type: string }
                       value: { type: string }
+                gateway:
+                  type: object
+                  description: |
+                    When enabled and spec.traffic is set, the operator emits a Gateway API
+                    HTTPRoute (gateway.networking.k8s.io/v1) with precise backendRef weights
+                    instead of relying on K8s Service round-robin for approximate split.
+                    Requires a Gateway-class controller (Istio, Cilium, Envoy Gateway, etc.)
+                    on the cluster.
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    parentRefs:
+                      type: array
+                      items:
+                        type: object
+                        required: [name]
+                        properties:
+                          name: { type: string, description: Name of the Gateway to attach to. }
+                          namespace: { type: string }
+                          sectionName: { type: string, description: Listener section on the Gateway. }
+                    hostnames:
+                      type: array
+                      items: { type: string }
+                traffic:
+                  type: array
+                  description: |
+                    Weighted traffic split across cohorts (canary / blue-green / A-B). When set,
+                    spec.replicas is interpreted as the TOTAL across all variants and each variant
+                    receives replicas proportional to its weight (minimum 1). A single Service
+                    fronts every variant — K8s round-robin on endpoints approximates the split.
+                    For precise % routing, enable spec.gateway to emit a Gateway API HTTPRoute.
+                  items:
+                    type: object
+                    required: [name, weight]
+                    properties:
+                      name:
+                        type: string
+                        description: Variant name (e.g. v1, v2, canary). Must be DNS-safe — used as a pod label.
+                        pattern: '^[a-z0-9]([-a-z0-9]{0,62}[a-z0-9])?$'
+                      weight:
+                        type: integer
+                        minimum: 0
+                        description: Relative weight. 0 drains the variant but keeps it reachable via X-TARN-Variant header.
+                      modelRepository:
+                        type: string
+                        description: Override spec.modelRepository for this variant (typically a different model version).
+                      image:
+                        type: string
+                        description: Override spec.image for this variant.
             status:
               type: object
               properties:

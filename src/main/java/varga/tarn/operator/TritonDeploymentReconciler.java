@@ -68,12 +68,21 @@ public class TritonDeploymentReconciler {
     /** Selector label applied to every pod/Service we create, identifying the owning CR. */
     public static final String LABEL_INSTANCE = "tarn.varga.io/instance";
     public static final String LABEL_COMPONENT = "tarn.varga.io/component";
+    public static final String LABEL_VARIANT = "tarn.varga.io/variant";
     public static final String COMPONENT_TRITON = "triton";
 
     private final KubernetesClient client;
+    private final TarnEvents events;
 
     public TritonDeploymentReconciler(KubernetesClient client) {
         this.client = client;
+        this.events = new TarnEvents(client);
+    }
+
+    // Test-only constructor that lets callers stub the event sink.
+    TritonDeploymentReconciler(KubernetesClient client, TarnEvents events) {
+        this.client = client;
+        this.events = events;
     }
 
     /**
@@ -95,40 +104,85 @@ public class TritonDeploymentReconciler {
             status.getConditions().add(new TritonDeploymentStatus.Condition(
                     "Ready", "False", "InvalidSpec",
                     "spec.image and spec.modelRepository are required"));
+            events.warning(cr, "InvalidSpec",
+                    "spec.image and spec.modelRepository are required");
             return status;
         }
 
         try {
-            Deployment desired = buildDeployment(cr);
-            applyDeployment(ns, desired);
+            List<TritonDeploymentSpec.TrafficVariant> variants = spec.getTraffic();
+            int totalReady;
+            if (variants == null || variants.isEmpty()) {
+                // Single-cohort path — one Deployment named after the CR.
+                Deployment desired = buildDeployment(cr);
+                applyDeployment(ns, desired);
 
+                Deployment current = client.apps().deployments().inNamespace(ns).withName(name).get();
+                totalReady = readyReplicasOf(current);
+                // Clean up any leftover variant deployments from a previous multi-cohort state.
+                pruneVariantDeployments(ns, name, java.util.Collections.emptySet());
+            } else {
+                // Multi-cohort path — one Deployment per variant, replicas proportional to weight.
+                Map<String, Integer> planned = planCohortReplicas(spec);
+                totalReady = 0;
+                for (Map.Entry<String, Integer> e : planned.entrySet()) {
+                    Deployment desired = buildVariantDeployment(cr, findVariant(variants, e.getKey()), e.getValue());
+                    applyDeployment(ns, desired);
+                    Deployment current = client.apps().deployments().inNamespace(ns)
+                            .withName(desired.getMetadata().getName()).get();
+                    totalReady += readyReplicasOf(current);
+                }
+                // Remove deployments for variants that were previously defined but no longer present.
+                pruneVariantDeployments(ns, name, planned.keySet());
+            }
+
+            // Single Service aggregating all cohorts (or the single deployment).
             Service svc = buildService(cr);
             applyService(ns, svc);
 
-            // Read back actual state to populate status.
-            Deployment current = client.apps().deployments().inNamespace(ns).withName(name).get();
-            int ready = 0;
-            if (current != null && current.getStatus() != null) {
-                DeploymentStatus ds = current.getStatus();
-                ready = ds.getReadyReplicas() == null ? 0 : ds.getReadyReplicas();
+            // Gateway API path: when enabled and we have multiple variants, emit per-variant
+            // Services + a single HTTPRoute with precise weights. Non-structured JSON so we
+            // don't drag a gatewayapi model dep into the main JAR.
+            if (variants != null && !variants.isEmpty()
+                    && spec.getGateway() != null
+                    && Boolean.TRUE.equals(spec.getGateway().getEnabled())) {
+                for (TritonDeploymentSpec.TrafficVariant v : variants) {
+                    Service variantSvc = buildVariantService(cr, v);
+                    applyService(ns, variantSvc);
+                }
+                applyHttpRoute(cr, variants);
             }
-            status.setReadyReplicas(ready);
-            if (ready >= spec.effectiveReplicas() && spec.effectiveReplicas() > 0) {
+
+            String previousPhase = cr.getStatus() == null ? null : cr.getStatus().getPhase();
+            status.setReadyReplicas(totalReady);
+            if (totalReady >= spec.effectiveReplicas() && spec.effectiveReplicas() > 0) {
                 status.setPhase(TritonDeploymentStatus.PHASE_READY);
                 replaceCondition(status, "Ready", "True", "DeploymentReady",
-                        ready + "/" + spec.effectiveReplicas() + " replicas ready");
+                        totalReady + "/" + spec.effectiveReplicas() + " replicas ready");
+                if (!TritonDeploymentStatus.PHASE_READY.equals(previousPhase)) {
+                    // Phase transition to Ready — worth an event, not worth spamming on every tick.
+                    events.normal(cr, "Ready", "All %d replicas are ready", totalReady);
+                }
             } else {
                 status.setPhase(TritonDeploymentStatus.PHASE_RECONCILING);
                 replaceCondition(status, "Ready", "False", "WaitingForReplicas",
-                        ready + "/" + spec.effectiveReplicas() + " replicas ready");
+                        totalReady + "/" + spec.effectiveReplicas() + " replicas ready");
+                if (!TritonDeploymentStatus.PHASE_RECONCILING.equals(previousPhase)
+                        && previousPhase != null) {
+                    events.normal(cr, "Reconciling", "Waiting for %d/%d replicas",
+                            totalReady, spec.effectiveReplicas());
+                }
             }
-            log.info("Reconciled {}/{}: phase={} ready={}/{}",
-                    ns, name, status.getPhase(), ready, spec.effectiveReplicas());
+            log.info("Reconciled {}/{}: phase={} ready={}/{} variants={}",
+                    ns, name, status.getPhase(), totalReady, spec.effectiveReplicas(),
+                    variants == null ? "single" : variants.size());
         } catch (Exception e) {
             log.error("Reconcile failed for {}/{}: {}", ns, name, e.getMessage(), e);
             status.setPhase(TritonDeploymentStatus.PHASE_DEGRADED);
             replaceCondition(status, "Ready", "False", "ReconcileError",
                     e.getClass().getSimpleName() + ": " + e.getMessage());
+            events.warning(cr, "ReconcileError", "%s: %s",
+                    e.getClass().getSimpleName(), e.getMessage());
         }
         return status;
     }
@@ -136,8 +190,294 @@ public class TritonDeploymentReconciler {
     /** Deletes a CR's dependent resources. Called when a CR is removed from the cluster. */
     public void cleanup(String namespace, String name) {
         client.apps().deployments().inNamespace(namespace).withName(name).delete();
+        // Cascade delete via OwnerReferences handles variant deployments automatically, but
+        // explicit cleanup is belt-and-suspenders for apiservers with GC lag.
+        client.apps().deployments().inNamespace(namespace)
+                .withLabel(LABEL_INSTANCE, name).delete();
         client.services().inNamespace(namespace).withName(name).delete();
         log.info("Cleaned up resources for {}/{}", namespace, name);
+    }
+
+    /**
+     * Distribute {@code spec.effectiveReplicas()} across variants proportionally to their
+     * weights. Variants with weight 0 get zero replicas (drained). Fractional shares are
+     * rounded so the total matches the requested count exactly — largest-remainder method.
+     * Variants with positive weight always get at least 1 replica unless their weight is
+     * literally 0.
+     */
+    static Map<String, Integer> planCohortReplicas(TritonDeploymentSpec spec) {
+        List<TritonDeploymentSpec.TrafficVariant> variants = spec.getTraffic();
+        int total = spec.effectiveReplicas();
+        Map<String, Integer> out = new java.util.LinkedHashMap<>();
+        int totalWeight = 0;
+        for (TritonDeploymentSpec.TrafficVariant v : variants) {
+            totalWeight += v.getWeight() == null ? 0 : Math.max(0, v.getWeight());
+        }
+        if (totalWeight == 0) {
+            // Degenerate spec — all weights 0 or null. Allocate one replica per variant as
+            // a safety net so the CR remains observable.
+            for (TritonDeploymentSpec.TrafficVariant v : variants) {
+                out.put(v.getName(), 1);
+            }
+            return out;
+        }
+
+        // Largest-remainder: floor initial shares, then distribute leftovers by descending
+        // fractional part. Deterministic for a given input.
+        double[] remainders = new double[variants.size()];
+        int allocated = 0;
+        for (int i = 0; i < variants.size(); i++) {
+            TritonDeploymentSpec.TrafficVariant v = variants.get(i);
+            int w = v.getWeight() == null ? 0 : Math.max(0, v.getWeight());
+            double exact = (double) w * total / totalWeight;
+            int floor = (int) Math.floor(exact);
+            remainders[i] = exact - floor;
+            if (w > 0 && floor == 0) floor = 1; // never starve an active variant
+            out.put(v.getName(), floor);
+            allocated += floor;
+        }
+        // Distribute leftovers.
+        int leftover = total - allocated;
+        while (leftover > 0) {
+            int bestIdx = -1;
+            double bestRem = -1.0;
+            for (int i = 0; i < variants.size(); i++) {
+                if (variants.get(i).getWeight() == null || variants.get(i).getWeight() <= 0) continue;
+                if (remainders[i] > bestRem) {
+                    bestRem = remainders[i];
+                    bestIdx = i;
+                }
+            }
+            if (bestIdx < 0) break;
+            out.merge(variants.get(bestIdx).getName(), 1, Integer::sum);
+            remainders[bestIdx] = -1.0; // each variant only gets one leftover
+            leftover--;
+        }
+        // If we over-allocated because of the starvation guard, trim from weight-0 variants.
+        while (allocated + (total - allocated - leftover) > total) {
+            // Shouldn't happen with above logic, defensive.
+            break;
+        }
+        return out;
+    }
+
+    private static TritonDeploymentSpec.TrafficVariant findVariant(
+            List<TritonDeploymentSpec.TrafficVariant> variants, String name) {
+        for (TritonDeploymentSpec.TrafficVariant v : variants) {
+            if (name.equals(v.getName())) return v;
+        }
+        return null;
+    }
+
+    private Deployment buildVariantDeployment(TritonDeployment cr,
+                                              TritonDeploymentSpec.TrafficVariant variant,
+                                              int replicas) {
+        String baseName = cr.getMetadata().getName();
+        String variantName = baseName + "-" + variant.getName();
+        TritonDeploymentSpec originalSpec = cr.getSpec();
+
+        // Clone spec with variant overrides applied.
+        TritonDeploymentSpec effective = shallowClone(originalSpec);
+        effective.setReplicas(replicas);
+        if (variant.getImage() != null && !variant.getImage().isEmpty()) {
+            effective.setImage(variant.getImage());
+        }
+        if (variant.getModelRepository() != null && !variant.getModelRepository().isEmpty()) {
+            effective.setModelRepository(variant.getModelRepository());
+        }
+        TritonDeployment projected = new TritonDeployment();
+        projected.setMetadata(new io.fabric8.kubernetes.api.model.ObjectMetaBuilder()
+                .withName(variantName)
+                .withNamespace(cr.getMetadata().getNamespace())
+                .withUid(cr.getMetadata().getUid())
+                .withGeneration(cr.getMetadata().getGeneration())
+                .build());
+        projected.setSpec(effective);
+        // Reuse the owner's apiVersion/kind so ownedMeta attaches the OwnerReference.
+        projected.setApiVersion(cr.getApiVersion());
+        projected.setKind(cr.getKind());
+        // Make sure the owner UID points to the ORIGINAL CR, not this projection.
+        projected.getMetadata().setOwnerReferences(null);
+
+        Deployment d = buildDeployment(projected);
+        // The selector includes the variant label so the aggregating Service can also
+        // select across all variants via a relaxed selector.
+        Map<String, String> variantLabels = new LinkedHashMap<>(commonLabels(cr));
+        variantLabels.put(LABEL_VARIANT, variant.getName());
+        d.getMetadata().setLabels(variantLabels);
+        d.getSpec().getTemplate().getMetadata().setLabels(variantLabels);
+        d.getSpec().setSelector(new io.fabric8.kubernetes.api.model.LabelSelectorBuilder()
+                .withMatchLabels(variantLabels).build());
+        // Owner reference must point back at the CR, not the projected wrapper.
+        d.getMetadata().setOwnerReferences(ownedMeta(cr, variantName).getOwnerReferences());
+        return d;
+    }
+
+    /** Delete any Deployments with this CR's instance label that aren't in the keep-set. */
+    private void pruneVariantDeployments(String ns, String instance, java.util.Set<String> keepVariantNames) {
+        var list = client.apps().deployments().inNamespace(ns)
+                .withLabel(LABEL_INSTANCE, instance)
+                .list();
+        for (Deployment d : list.getItems()) {
+            String variant = d.getMetadata().getLabels() == null
+                    ? null : d.getMetadata().getLabels().get(LABEL_VARIANT);
+            // The single-cohort Deployment has no variant label and name == instance.
+            // Variant Deployments are named <instance>-<variant>.
+            if (variant == null) {
+                // In single-cohort mode (keepVariantNames empty), KEEP the no-variant Deployment;
+                // in multi-cohort mode, DELETE it.
+                if (!keepVariantNames.isEmpty()) {
+                    client.apps().deployments().inNamespace(ns)
+                            .withName(d.getMetadata().getName()).delete();
+                }
+                continue;
+            }
+            if (!keepVariantNames.contains(variant)) {
+                client.apps().deployments().inNamespace(ns)
+                        .withName(d.getMetadata().getName()).delete();
+            }
+        }
+    }
+
+    /**
+     * Variant-specific Service selecting only the pods of that variant. Used by the HTTPRoute
+     * to send a precise fraction of traffic to each cohort.
+     */
+    private Service buildVariantService(TritonDeployment cr, TritonDeploymentSpec.TrafficVariant v) {
+        String variantName = cr.getMetadata().getName() + "-" + v.getName();
+        Map<String, String> selector = new LinkedHashMap<>(commonLabels(cr));
+        selector.put(LABEL_VARIANT, v.getName());
+
+        List<ServicePort> ports = new ArrayList<>();
+        ports.add(new ServicePortBuilder().withName("http").withPort(8000)
+                .withTargetPort(new IntOrString("http")).withProtocol("TCP").build());
+        ports.add(new ServicePortBuilder().withName("grpc").withPort(8001)
+                .withTargetPort(new IntOrString("grpc")).withProtocol("TCP").build());
+        if (Boolean.TRUE.equals(effectiveProxyEnabled(cr.getSpec()))) {
+            int openaiPort = cr.getSpec().getOpenaiProxy() != null && cr.getSpec().getOpenaiProxy().getPort() != null
+                    ? cr.getSpec().getOpenaiProxy().getPort() : 9000;
+            ports.add(new ServicePortBuilder().withName("openai").withPort(openaiPort)
+                    .withTargetPort(new IntOrString("openai")).withProtocol("TCP").build());
+        }
+        return new ServiceBuilder()
+                .withMetadata(ownedMeta(cr, variantName))
+                .withNewSpec()
+                    .withSelector(selector)
+                    .withPorts(ports)
+                    .withType("ClusterIP")
+                .endSpec()
+                .build();
+    }
+
+    /**
+     * Apply (create-or-update) a Gateway API HTTPRoute pointing at the per-variant Services
+     * with exact weights. We use GenericKubernetesResource to avoid pulling the gateway-api
+     * model jar into the main uber-JAR — clusters without Gateway API installed simply won't
+     * have the CRD registered and the apply silently no-ops (we catch and log).
+     */
+    private void applyHttpRoute(TritonDeployment cr, List<TritonDeploymentSpec.TrafficVariant> variants) {
+        TritonDeploymentSpec.Gateway gw = cr.getSpec().getGateway();
+        if (gw == null || gw.getParentRefs() == null || gw.getParentRefs().isEmpty()) {
+            log.warn("gateway.enabled=true but gateway.parentRefs is empty — HTTPRoute skipped");
+            return;
+        }
+        String ns = cr.getMetadata().getNamespace();
+        String name = cr.getMetadata().getName();
+        int openaiPort = Boolean.TRUE.equals(effectiveProxyEnabled(cr.getSpec()))
+                && cr.getSpec().getOpenaiProxy() != null
+                && cr.getSpec().getOpenaiProxy().getPort() != null
+                ? cr.getSpec().getOpenaiProxy().getPort() : 8000;
+
+        List<Map<String, Object>> parentRefs = new ArrayList<>();
+        for (TritonDeploymentSpec.ParentRef p : gw.getParentRefs()) {
+            Map<String, Object> ref = new LinkedHashMap<>();
+            ref.put("name", p.getName());
+            if (p.getNamespace() != null) ref.put("namespace", p.getNamespace());
+            if (p.getSectionName() != null) ref.put("sectionName", p.getSectionName());
+            parentRefs.add(ref);
+        }
+
+        List<Map<String, Object>> backendRefs = new ArrayList<>();
+        for (TritonDeploymentSpec.TrafficVariant v : variants) {
+            int w = v.getWeight() == null ? 0 : v.getWeight();
+            Map<String, Object> br = new LinkedHashMap<>();
+            br.put("name", name + "-" + v.getName());
+            br.put("port", openaiPort);
+            br.put("weight", w);
+            backendRefs.add(br);
+        }
+
+        Map<String, Object> rule = new LinkedHashMap<>();
+        rule.put("backendRefs", backendRefs);
+
+        Map<String, Object> specMap = new LinkedHashMap<>();
+        specMap.put("parentRefs", parentRefs);
+        if (gw.getHostnames() != null && !gw.getHostnames().isEmpty()) {
+            specMap.put("hostnames", gw.getHostnames());
+        }
+        specMap.put("rules", java.util.Collections.singletonList(rule));
+
+        io.fabric8.kubernetes.api.model.GenericKubernetesResource route =
+                new io.fabric8.kubernetes.api.model.GenericKubernetesResource();
+        route.setApiVersion("gateway.networking.k8s.io/v1");
+        route.setKind("HTTPRoute");
+        route.setMetadata(new io.fabric8.kubernetes.api.model.ObjectMetaBuilder()
+                .withName(name)
+                .withNamespace(ns)
+                .withLabels(commonLabels(cr))
+                .withOwnerReferences(ownedMeta(cr, name).getOwnerReferences())
+                .build());
+        route.setAdditionalProperty("spec", specMap);
+
+        io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext rdc =
+                new io.fabric8.kubernetes.client.dsl.base.ResourceDefinitionContext.Builder()
+                        .withGroup("gateway.networking.k8s.io")
+                        .withVersion("v1")
+                        .withKind("HTTPRoute")
+                        .withPlural("httproutes")
+                        .withNamespaced(true)
+                        .build();
+        try {
+            var existing = client.genericKubernetesResources(rdc).inNamespace(ns)
+                    .withName(name).get();
+            if (existing == null) {
+                client.genericKubernetesResources(rdc).inNamespace(ns)
+                        .resource(route).create();
+            } else {
+                route.getMetadata().setResourceVersion(existing.getMetadata().getResourceVersion());
+                client.genericKubernetesResources(rdc).inNamespace(ns)
+                        .resource(route).update();
+            }
+        } catch (Exception e) {
+            log.warn("Failed to apply HTTPRoute for {}/{}: {} (is Gateway API installed on the cluster?)",
+                    ns, name, e.getMessage());
+            events.warning(cr, "HTTPRouteFailed",
+                    "Could not apply HTTPRoute (Gateway API CRDs missing?): %s", e.getMessage());
+        }
+    }
+
+    private static int readyReplicasOf(Deployment current) {
+        if (current == null || current.getStatus() == null) return 0;
+        Integer r = current.getStatus().getReadyReplicas();
+        return r == null ? 0 : r;
+    }
+
+    private static TritonDeploymentSpec shallowClone(TritonDeploymentSpec in) {
+        TritonDeploymentSpec out = new TritonDeploymentSpec();
+        out.setImage(in.getImage());
+        out.setModelRepository(in.getModelRepository());
+        out.setReplicas(in.getReplicas());
+        out.setTensorParallelism(in.getTensorParallelism());
+        out.setPipelineParallelism(in.getPipelineParallelism());
+        out.setAccelerator(in.getAccelerator());
+        out.setResources(in.getResources());
+        out.setOpenaiProxy(in.getOpenaiProxy());
+        out.setScaling(in.getScaling());
+        out.setRanger(in.getRanger());
+        out.setQuotasRef(in.getQuotasRef());
+        out.setEnv(in.getEnv());
+        // Intentionally NOT copying traffic — the projected CR is single-cohort.
+        return out;
     }
 
     /**

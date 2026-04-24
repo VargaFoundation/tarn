@@ -44,6 +44,8 @@ public class TritonDeploymentSpec {
     private Ranger ranger;
     private QuotasRef quotasRef;
     private List<EnvVar> env;
+    private List<TrafficVariant> traffic;
+    private Gateway gateway;
 
     // --- Getters / setters (plain POJO, no Lombok here — fabric8 serialization is strict) ---
 
@@ -71,6 +73,10 @@ public class TritonDeploymentSpec {
     public void setQuotasRef(QuotasRef q) { this.quotasRef = q; }
     public List<EnvVar> getEnv() { return env; }
     public void setEnv(List<EnvVar> env) { this.env = env; }
+    public List<TrafficVariant> getTraffic() { return traffic; }
+    public void setTraffic(List<TrafficVariant> traffic) { this.traffic = traffic; }
+    public Gateway getGateway() { return gateway; }
+    public void setGateway(Gateway gateway) { this.gateway = gateway; }
 
     // --- Effective getters with defaults applied — used by the reconciler ---
 
@@ -187,6 +193,50 @@ public class TritonDeploymentSpec {
         public void setName(String n) { this.name = n; }
         public String getValue() { return value; }
         public void setValue(String v) { this.value = v; }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Gateway {
+        private Boolean enabled = false;
+        private List<ParentRef> parentRefs;
+        private List<String> hostnames;
+        public Boolean getEnabled() { return enabled; }
+        public void setEnabled(Boolean b) { this.enabled = b; }
+        public List<ParentRef> getParentRefs() { return parentRefs; }
+        public void setParentRefs(List<ParentRef> p) { this.parentRefs = p; }
+        public List<String> getHostnames() { return hostnames; }
+        public void setHostnames(List<String> h) { this.hostnames = h; }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class ParentRef {
+        private String name;
+        private String namespace;
+        private String sectionName;
+        public String getName() { return name; }
+        public void setName(String n) { this.name = n; }
+        public String getNamespace() { return namespace; }
+        public void setNamespace(String n) { this.namespace = n; }
+        public String getSectionName() { return sectionName; }
+        public void setSectionName(String s) { this.sectionName = s; }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class TrafficVariant {
+        private String name;
+        private Integer weight;
+        private String modelRepository;
+        private String image;
+        public TrafficVariant() {}
+        public TrafficVariant(String name, int weight) { this.name = name; this.weight = weight; }
+        public String getName() { return name; }
+        public void setName(String n) { this.name = n; }
+        public Integer getWeight() { return weight; }
+        public void setWeight(Integer w) { this.weight = w; }
+        public String getModelRepository() { return modelRepository; }
+        public void setModelRepository(String m) { this.modelRepository = m; }
+        public String getImage() { return image; }
+        public void setImage(String i) { this.image = i; }
     }
 
     // Unused but kept to satisfy compilers that want Map<String,String> coercion in tests.
