@@ -54,6 +54,10 @@ public class TarnConfig {
     public boolean rangerAudit;
     public boolean rangerStrict;
     public boolean zkRequired;
+    // Local path to a JAAS config file (e.g. for SASL/Kerberos ZK auth). The Client uploads
+    // it to HDFS as a LocalResource and sets JAVA_TOOL_OPTIONS on the AM container so the
+    // JVM picks it up automatically. Null = no JAAS staging.
+    public String zkJaasPath;
     public long drainTimeoutMs;
     public long monitorIntervalMs;
     // TLS for the AM HTTP server. When enabled, --tls-keystore must be set.
@@ -127,6 +131,7 @@ public class TarnConfig {
         rangerStrict = Boolean.parseBoolean(getEnv("RANGER_STRICT", rangerService != null ? "true" : "false"));
         // Default to required-ZK when an ensemble is configured.
         zkRequired = Boolean.parseBoolean(getEnv("ZK_REQUIRED", zkEnsemble != null ? "true" : "false"));
+        zkJaasPath = getEnv("ZK_JAAS", null);
         drainTimeoutMs = Long.parseLong(getEnv("DRAIN_TIMEOUT_MS", "30000"));
         monitorIntervalMs = Long.parseLong(getEnv("MONITOR_INTERVAL_MS", "15000"));
         tlsEnabled = Boolean.parseBoolean(getEnv("TLS_ENABLED", "false"));
@@ -207,6 +212,7 @@ public class TarnConfig {
         if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
         if (line.hasOption("ranger-strict")) rangerStrict = true;
         if (line.hasOption("zk-required")) zkRequired = true;
+        if (line.hasOption("zk-jaas")) zkJaasPath = line.getOptionValue("zk-jaas");
         if (line.hasOption("drain-timeout-ms")) drainTimeoutMs = Long.parseLong(line.getOptionValue("drain-timeout-ms"));
         if (line.hasOption("monitor-interval-ms")) monitorIntervalMs = Long.parseLong(line.getOptionValue("monitor-interval-ms"));
         if (line.hasOption("tls-enabled")) tlsEnabled = true;
@@ -296,6 +302,7 @@ public class TarnConfig {
         options.addOption("raudit", "ranger-audit", false, "Enable Apache Ranger auditing");
         options.addOption(null, "ranger-strict", false, "Deny-by-default if Ranger plugin fails to initialize (recommended in regulated clusters)");
         options.addOption(null, "zk-required", false, "Fail the AM if ZooKeeper is unreachable (recommended when Knox depends on ZK discovery)");
+        options.addOption(null, "zk-jaas", true, "Local path to a JAAS config for SASL/Kerberos ZooKeeper auth — uploaded to HDFS and set as -Djava.security.auth.login.config on the AM JVM");
         options.addOption(null, "drain-timeout-ms", true, "Max wait for in-flight inferences before stopping a container during scale-down (default 30000)");
         options.addOption(null, "monitor-interval-ms", true, "Interval between scaling evaluations in ms (default 15000)");
         options.addOption(null, "tls-enabled", false, "Serve AM endpoints over HTTPS (requires --tls-keystore)");

@@ -79,15 +79,17 @@ public class TritonCommandBuilderTest {
     }
 
     @Test
-    public void buildIncludesHdfsCopyForHdfsRepository() {
+    public void buildPointsAtLocalizedDirForHdfsRepository() {
         String cmd = new TritonCommandBuilder()
                 .modelRepository("hdfs:///user/models")
                 .httpPort(8000)
                 .grpcPort(8001)
                 .metricsPort(8002)
                 .build();
-        assertTrue(cmd.contains("hadoop fs -copyToLocal hdfs:///user/models/* /models"));
-        assertTrue(cmd.contains("--model-repository=/models"));
+        // No in-container hadoop fetch — the AM registers HDFS files as YARN LocalResources
+        // and they land at ./models in the container's working directory.
+        assertFalse(cmd.contains("hadoop fs"));
+        assertTrue(cmd.contains("--model-repository ./models"));
     }
 
     @Test
@@ -96,7 +98,7 @@ public class TritonCommandBuilderTest {
                 .modelRepository("/mnt/nfs/models")
                 .build();
         assertFalse(cmd.contains("hadoop fs -copyToLocal"));
-        assertTrue(cmd.contains("--model-repository=/mnt/nfs/models"));
+        assertTrue(cmd.contains("--model-repository /mnt/nfs/models"));
     }
 
     @Test

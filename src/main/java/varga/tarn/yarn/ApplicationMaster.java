@@ -694,6 +694,63 @@ public class ApplicationMaster {
         }
     }
 
+    /**
+     * Build a YARN LocalResource map for an HDFS model repository (or single archive). Walks the
+     * tree and registers each file under {@code models/<relative-path>}; YARN's NM downloads them
+     * to the container's working directory before {@code docker run}, and the docker container
+     * runtime mounts them in (when {@code YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS=true}).
+     *
+     * <p>If the path points at a {@code .tar.gz}/{@code .zip} file, it is registered as ARCHIVE
+     * type and YARN extracts it under {@code ./models/} on the NM. Otherwise files are localized
+     * individually preserving the directory layout.
+     */
+    private Map<String, LocalResource> buildHdfsModelLocalResources(String hdfsUri) throws IOException {
+        Map<String, LocalResource> resources = new HashMap<>();
+        Path root = new Path(hdfsUri);
+        FileSystem fs = root.getFileSystem(conf);
+        if (!fs.exists(root)) {
+            throw new IOException("Model repository does not exist: " + hdfsUri);
+        }
+
+        FileStatus rootStatus = fs.getFileStatus(root);
+        String name = root.getName().toLowerCase();
+        if (rootStatus.isFile() && (name.endsWith(".tar.gz") || name.endsWith(".tgz") || name.endsWith(".zip"))) {
+            LocalResource res = Records.newRecord(LocalResource.class);
+            res.setResource(URL.fromPath(root));
+            res.setSize(rootStatus.getLen());
+            res.setTimestamp(rootStatus.getModificationTime());
+            res.setType(LocalResourceType.ARCHIVE);
+            res.setVisibility(LocalResourceVisibility.APPLICATION);
+            resources.put("models", res);
+            return resources;
+        }
+        if (!rootStatus.isDirectory()) {
+            throw new IOException("Model repository must be a directory or .tar.gz/.tgz/.zip archive: " + hdfsUri);
+        }
+
+        // Recursive walk over the model dir; register each FILE as a LocalResource preserving
+        // the relative directory structure under models/...
+        org.apache.hadoop.fs.RemoteIterator<org.apache.hadoop.fs.LocatedFileStatus> it = fs.listFiles(root, true);
+        String rootUriPath = root.toUri().getPath();
+        while (it.hasNext()) {
+            org.apache.hadoop.fs.LocatedFileStatus f = it.next();
+            String relPath = f.getPath().toUri().getPath();
+            if (relPath.startsWith(rootUriPath + "/")) {
+                relPath = relPath.substring(rootUriPath.length() + 1);
+            } else if (relPath.equals(rootUriPath)) {
+                continue;
+            }
+            LocalResource res = Records.newRecord(LocalResource.class);
+            res.setResource(URL.fromPath(f.getPath()));
+            res.setSize(f.getLen());
+            res.setTimestamp(f.getModificationTime());
+            res.setType(LocalResourceType.FILE);
+            res.setVisibility(LocalResourceVisibility.APPLICATION);
+            resources.put("models/" + relPath, res);
+        }
+        return resources;
+    }
+
     private class RMCallbackHandler extends AMRMClientAsync.AbstractCallbackHandler {
         @Override
         public void onContainersAllocated(List<Container> containers) {
@@ -713,7 +770,10 @@ public class ApplicationMaster {
             Map<String, String> env = new HashMap<>();
             env.put("YARN_CONTAINER_RUNTIME_TYPE", "docker");
             env.put("YARN_CONTAINER_RUNTIME_DOCKER_IMAGE", config.tritonImage);
-            env.put("YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE", "true");
+            // Keep the image entrypoint disabled so YARN wraps the launch command with `bash -c`.
+            // With use-entry-point=true the image entrypoint receives the full launch string as a
+            // single arg and `exec "$@"`s it as one binary path — which crashes with exit 127.
+            env.put("YARN_CONTAINER_RUNTIME_DOCKER_RUN_OVERRIDE_DISABLE", "false");
             if (config.dockerNetwork != null && !config.dockerNetwork.isEmpty()) {
                 env.put("YARN_CONTAINER_RUNTIME_DOCKER_CONTAINER_NETWORK", config.dockerNetwork);
             }
@@ -791,6 +851,46 @@ public class ApplicationMaster {
             }
 
             ctx.setEnvironment(env);
+
+            // Propagate the AM's HDFS delegation tokens so the NM can localize HDFS resources
+            // (model repo files, jar) on behalf of the application user on a Kerberized cluster.
+            try {
+                org.apache.hadoop.security.Credentials creds =
+                        org.apache.hadoop.security.UserGroupInformation.getCurrentUser().getCredentials();
+                if (creds != null && creds.numberOfTokens() > 0) {
+                    org.apache.hadoop.io.DataOutputBuffer dob = new org.apache.hadoop.io.DataOutputBuffer();
+                    creds.writeTokenStorageToStream(dob);
+                    ctx.setTokens(java.nio.ByteBuffer.wrap(dob.getData(), 0, dob.getLength()));
+                }
+            } catch (IOException e) {
+                log.warn("Failed to attach AM credentials to child container: {}", e.getMessage());
+            }
+
+            // For hdfs:// model repos, register the model tree as YARN LocalResources so the NM
+            // localizes them to the container's working directory before docker run. The Triton
+            // image has no `hadoop` CLI, so doing the fetch from inside the container (the old
+            // approach) is broken. With YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS=true,
+            // the localized files are auto-mounted into the docker container; we point Triton at
+            // ./models inside the container.
+            if (config.modelRepository != null && config.modelRepository.startsWith("hdfs://")) {
+                try {
+                    Map<String, LocalResource> modelResources = buildHdfsModelLocalResources(config.modelRepository);
+                    if (!modelResources.isEmpty()) {
+                        ctx.setLocalResources(modelResources);
+                        log.info("Registered {} HDFS model files as YARN LocalResources for container {}",
+                                modelResources.size(), container.getId());
+                    } else {
+                        log.warn("HDFS model path {} produced no LocalResources (empty dir?)",
+                                config.modelRepository);
+                    }
+                } catch (IOException e) {
+                    log.error("Failed to localize HDFS model repo {}: {}",
+                            config.modelRepository, e.getMessage(), e);
+                    metricsCollector.recordContainerFailure(container.getId().toString(),
+                            "Model localization failed: " + e.getMessage());
+                    return;
+                }
+            }
 
             String launchCommand = new TritonCommandBuilder()
                     .modelRepository(config.modelRepository)

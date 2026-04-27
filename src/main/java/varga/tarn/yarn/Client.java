@@ -29,6 +29,9 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.DataOutputBuffer;
+import org.apache.hadoop.security.Credentials;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 import org.apache.hadoop.yarn.api.records.*;
 import org.apache.hadoop.yarn.client.api.YarnClient;
@@ -41,6 +44,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -156,6 +160,7 @@ public class Client {
         // defaults instead of honoring what the operator passed to the Client.
         env.put("RANGER_STRICT", String.valueOf(config.rangerStrict));
         env.put("ZK_REQUIRED", String.valueOf(config.zkRequired));
+        if (config.zkJaasPath != null) env.put("ZK_JAAS", config.zkJaasPath);
         env.put("DRAIN_TIMEOUT_MS", String.valueOf(config.drainTimeoutMs));
         env.put("MONITOR_INTERVAL_MS", String.valueOf(config.monitorIntervalMs));
         env.put("TLS_ENABLED", String.valueOf(config.tlsEnabled));
@@ -242,7 +247,42 @@ public class Client {
         if (config.jarPath != null && !config.jarPath.isEmpty()) {
             setupAppJar(new Path(config.jarPath), localResources, appId);
         }
+
+        // Stage the ZK JAAS file (if any) so the AM JVM can authenticate to a Kerberized
+        // ZooKeeper. We upload from a local path on the YARN client host, deliver it as
+        // tarn_zk_jaas.conf in the AM working directory, and set JAVA_TOOL_OPTIONS so the
+        // JVM honors it automatically. This avoids modifying the AM launch command.
+        if (config.zkJaasPath != null && !config.zkJaasPath.isEmpty()) {
+            Path localJaas = new Path(config.zkJaasPath);
+            String resourceName = "tarn_zk_jaas.conf";
+            setupExtraResource(localJaas, resourceName, localResources, appId);
+            String existing = env.getOrDefault("JAVA_TOOL_OPTIONS", "");
+            String jaasOpt = "-Djava.security.auth.login.config=./" + resourceName;
+            env.put("JAVA_TOOL_OPTIONS", (existing + " " + jaasOpt).trim());
+            log.info("Staged ZK JAAS '{}' as LocalResource and set JAVA_TOOL_OPTIONS",
+                    config.zkJaasPath);
+        }
+
+        // Re-apply the env now that JAVA_TOOL_OPTIONS may have been added.
+        amContainer.setEnvironment(env);
+
         amContainer.setLocalResources(localResources);
+
+        // On a Kerberized cluster the AM (and its child containers) need HDFS delegation tokens
+        // so the NM can localize jar/JAAS/model files on behalf of the submitting user.
+        if (UserGroupInformation.isSecurityEnabled()) {
+            Credentials creds = new Credentials();
+            String tokenRenewer = conf.get(org.apache.hadoop.yarn.conf.YarnConfiguration.RM_PRINCIPAL);
+            if (tokenRenewer == null || tokenRenewer.isEmpty()) {
+                throw new IOException("yarn.resourcemanager.principal is unset; cannot acquire HDFS delegation tokens");
+            }
+            FileSystem fs = FileSystem.get(conf);
+            fs.addDelegationTokens(tokenRenewer, creds);
+            DataOutputBuffer dob = new DataOutputBuffer();
+            creds.writeTokenStorageToStream(dob);
+            amContainer.setTokens(ByteBuffer.wrap(dob.getData(), 0, dob.getLength()));
+            log.info("Attached {} delegation token(s) to AM container", creds.numberOfTokens());
+        }
 
         appContext.setAMContainerSpec(amContainer);
 
@@ -320,21 +360,33 @@ public class Client {
     }
 
     private void setupAppJar(Path jarPath, Map<String, LocalResource> localResources, ApplicationId appId) throws IOException {
-        FileSystem fs = FileSystem.get(conf);
-        Path destPath = new Path(fs.getHomeDirectory(), ".tarn/jars/" + appId.toString() + "/tarn.jar");
+        setupExtraResource(jarPath, "tarn.jar", localResources, appId);
+    }
 
-        log.info("Uploading JAR from {} to {}", jarPath, destPath);
-        fs.copyFromLocalFile(false, true, jarPath, destPath);
+    /**
+     * Upload a local file to HDFS and register it as a YARN {@link LocalResource} so the AM
+     * container has it under {@code resourceName} in its working directory. Used for the
+     * application JAR and for the ZK JAAS conf.
+     */
+    private void setupExtraResource(Path localPath, String resourceName,
+                                    Map<String, LocalResource> localResources,
+                                    ApplicationId appId) throws IOException {
+        FileSystem fs = FileSystem.get(conf);
+        Path destPath = new Path(fs.getHomeDirectory(),
+                ".tarn/resources/" + appId.toString() + "/" + resourceName);
+
+        log.info("Uploading {} from {} to {}", resourceName, localPath, destPath);
+        fs.copyFromLocalFile(false, true, localPath, destPath);
 
         FileStatus destStatus = fs.getFileStatus(destPath);
-        LocalResource jarResource = Records.newRecord(LocalResource.class);
-        jarResource.setResource(URL.fromPath(destPath));
-        jarResource.setSize(destStatus.getLen());
-        jarResource.setTimestamp(destStatus.getModificationTime());
-        jarResource.setType(LocalResourceType.FILE);
-        jarResource.setVisibility(LocalResourceVisibility.APPLICATION);
+        LocalResource res = Records.newRecord(LocalResource.class);
+        res.setResource(URL.fromPath(destPath));
+        res.setSize(destStatus.getLen());
+        res.setTimestamp(destStatus.getModificationTime());
+        res.setType(LocalResourceType.FILE);
+        res.setVisibility(LocalResourceVisibility.APPLICATION);
 
-        localResources.put("tarn.jar", jarResource);
+        localResources.put(resourceName, res);
     }
 
     public static void main(String[] args) throws Exception {

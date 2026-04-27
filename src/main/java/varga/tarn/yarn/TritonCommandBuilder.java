@@ -103,11 +103,14 @@ public class TritonCommandBuilder {
         StringBuilder sb = new StringBuilder();
         String localModelPath = "/models";
 
-        // Pre-loading logic
+        // For HDFS paths the AM registers each model file as a YARN LocalResource (see
+        // ApplicationMaster.buildHdfsModelLocalResources). With YARN_CONTAINER_RUNTIME_DOCKER_LOCAL_RESOURCE_MOUNTS=true,
+        // those files are mounted into the docker container at the working directory, so the
+        // model tree shows up at ./models — no in-container `hadoop fs` step (which would fail
+        // since the Triton image has no hadoop CLI).
         if (modelRepository != null && !modelRepository.isEmpty()) {
             if (modelRepository.startsWith("hdfs://")) {
-                sb.append("mkdir -p ").append(localModelPath).append(" && ");
-                sb.append("hadoop fs -copyToLocal ").append(modelRepository).append("/* ").append(localModelPath).append(" && ");
+                localModelPath = "./models";
             } else if (modelRepository.startsWith("/")) {
                 localModelPath = modelRepository;
             }
@@ -125,23 +128,23 @@ public class TritonCommandBuilder {
             for (int i = 0; i < worldSize; i++) {
                 if (i > 0) sb.append(" : ");
                 sb.append("-n 1 tritonserver ");
-                sb.append("--id=rank").append(i).append(" ");
-                sb.append("--model-repository=").append(localModelPath).append(" ");
-                sb.append("--backend-config=python,shm-region-prefix-name=rank").append(i).append("_ ");
+                sb.append("--id rank").append(i).append(" ");
+                sb.append("--model-repository ").append(localModelPath).append(" ");
+                sb.append("--backend-config python,shm-region-prefix-name=rank").append(i).append("_ ");
 
                 if (i == 0) {
                     sb.append(getCommonArgs(httpPort, grpcPort, metricsPort, bindAddress));
                 } else {
-                    sb.append("--http-port=").append(httpPort + i * 10).append(" ");
-                    sb.append("--grpc-port=").append(grpcPort + i * 10).append(" ");
-                    sb.append("--allow-http=false --allow-grpc=false --allow-metrics=false ");
-                    sb.append("--log-info=false --log-warning=false --model-control-mode=explicit --load-model=tensorrt_llm ");
-                    sb.append("--model-load-thread-count=2 ");
+                    sb.append("--http-port ").append(httpPort + i * 10).append(" ");
+                    sb.append("--grpc-port ").append(grpcPort + i * 10).append(" ");
+                    sb.append("--allow-http false --allow-grpc false --allow-metrics false ");
+                    sb.append("--log-info false --log-warning false --model-control-mode explicit --load-model tensorrt_llm ");
+                    sb.append("--model-load-thread-count 2 ");
                 }
             }
         } else {
             sb.append("tritonserver ");
-            sb.append("--model-repository=").append(localModelPath).append(" ");
+            sb.append("--model-repository ").append(localModelPath).append(" ");
             sb.append(getCommonArgs(httpPort, grpcPort, metricsPort, bindAddress));
         }
 
@@ -149,10 +152,10 @@ public class TritonCommandBuilder {
     }
 
     private String getCommonArgs(int httpPort, int grpcPort, int metricsPort, String bindAddress) {
-        return String.format("--http-port=%d --grpc-port=%d --metrics-port=%d " +
-                        "--http-address=%s --metrics-address=%s " +
-                        "--allow-cpu-metrics=false --allow-gpu-metrics=false --allow-metrics=true " +
-                        "--metrics-interval-ms=1000 --model-load-thread-count=2 --strict-readiness=true ",
+        return String.format("--http-port %d --grpc-port %d --metrics-port %d " +
+                        "--http-address %s --metrics-address %s " +
+                        "--allow-cpu-metrics false --allow-gpu-metrics false --allow-metrics true " +
+                        "--metrics-interval-ms 1000 --model-load-thread-count 2 --strict-readiness true ",
                 httpPort, grpcPort, metricsPort, bindAddress, bindAddress);
     }
 }
