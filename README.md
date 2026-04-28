@@ -864,6 +864,114 @@ output [
 
 Triton supports multiple versions of a model within the same repository. Each version resides in its own directory (e.g., 1/, 2/). By default, Triton serves the latest version, but this behavior can be customized using version policies.
 
+### 0. Quickstart: Identity model (CPU smoke test)
+
+A minimal Python-backend model that echoes its input. Use it as a smoke test of the
+full TARN → YARN → Docker → Triton path before deploying a real LLM / vision model
+— no GPU required, the HDFS payload is under 1 KB.
+
+**1. Build the model repository locally**
+
+```bash
+mkdir -p identity-model/identity/1
+
+cat > identity-model/identity/config.pbtxt <<'EOF'
+name: "identity"
+backend: "python"
+max_batch_size: 0
+input  [{ name: "INPUT0",  data_type: TYPE_FP32, dims: [-1] }]
+output [{ name: "OUTPUT0", data_type: TYPE_FP32, dims: [-1] }]
+instance_group [{ kind: KIND_CPU }]
+EOF
+
+cat > identity-model/identity/1/model.py <<'EOF'
+import json
+import triton_python_backend_utils as pb_utils
+
+
+class TritonPythonModel:
+    def initialize(self, args):
+        self.model_config = json.loads(args["model_config"])
+
+    def execute(self, requests):
+        responses = []
+        for request in requests:
+            in_t = pb_utils.get_input_tensor_by_name(request, "INPUT0")
+            out_t = pb_utils.Tensor("OUTPUT0", in_t.as_numpy())
+            responses.append(pb_utils.InferenceResponse([out_t]))
+        return responses
+
+    def finalize(self):
+        pass
+EOF
+```
+
+**2. Stage on HDFS**
+
+```bash
+kinit ambari-qa@EXAMPLE.COM         # any user that can write under /tmp
+hadoop fs -mkdir -p /tmp/tarn-models
+hadoop fs -copyFromLocal -f identity-model/identity /tmp/tarn-models/
+hadoop fs -ls -R /tmp/tarn-models
+```
+
+**3. Deploy via TARN**
+
+Standalone (development):
+
+```bash
+yarn jar /usr/lib/tarn/tarn.jar varga.tarn.yarn.Client \
+  --model-repository hdfs:///tmp/tarn-models \
+  --image nvcr.io/nvidia/tritonserver:24.09-py3 \
+  --accelerator-type cpu_only \
+  --am-port 8888 --port 8000 --grpc-port 8001 --metrics-port 8002 \
+  --min-instances 1 --max-instances 1
+```
+
+Or via Ambari: `tarn-site` → `tarn.model.repository=hdfs:///tmp/tarn-models`,
+`tarn.accelerator.type=cpu_only`; then restart `TARN_SERVER`.
+
+The AM registers each HDFS file as a YARN `LocalResource` and propagates the HDFS
+delegation token to every Triton container. The NM localizes the model tree on
+the host before `docker run`, and Docker bind-mounts it into the container at
+`./models` — so Triton starts even though the
+`nvcr.io/nvidia/tritonserver:24.09-py3` image has no `hadoop` CLI inside.
+
+**4. Verify**
+
+```bash
+AM=<AM_HOST>:8888
+
+# AM is alive and has at least one ready instance.
+curl http://$AM/health
+# OK
+
+INSTANCE=$(curl -s http://$AM/instances | head -1)
+echo "Triton at $INSTANCE"
+# 159-106-159-51.example.com:8000
+
+# Triton accepts requests and the identity model round-trips.
+curl http://$INSTANCE/v2/health/ready -o /dev/null -w '%{http_code}\n'
+# 200
+
+curl -X POST http://$INSTANCE/v2/repository/index
+# [{"name":"identity","version":"1","state":"READY"}]
+
+curl -X POST http://$INSTANCE/v2/models/identity/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[{"name":"INPUT0","shape":[5],"datatype":"FP32",
+       "data":[1.0,2.0,3.0,4.0,5.0]}]}'
+# {"model_name":"identity","model_version":"1","outputs":[
+#  {"name":"OUTPUT0","datatype":"FP32","shape":[5],"data":[1.0,2.0,3.0,4.0,5.0]}]}
+```
+
+If `/health` returns `NO_INSTANCES_READY`, check
+`/data/hadoop_*/yarn/log/<appId>/container_*_000001/AppMaster.stderr` on the AM
+host. The most common cause on a Kerberized cluster is missing HDFS delegation
+tokens — the TARN client attaches them automatically when security is enabled,
+so make sure the submitting user has run `kinit` and that
+`yarn.resourcemanager.principal` is configured.
+
 ### 1. Stable Diffusion (Image Generation)
 
 To deploy Stable Diffusion, you need to have the model repository structured correctly.
