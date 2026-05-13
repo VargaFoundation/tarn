@@ -38,6 +38,7 @@ public class TritonDeploymentStatus {
     public static final String PHASE_READY = "Ready";
     public static final String PHASE_DEGRADED = "Degraded";
     public static final String PHASE_FAILED = "Failed";
+    public static final String PHASE_TERMINATING = "Terminating";
 
     private String phase = PHASE_PENDING;
     private Integer readyReplicas = 0;

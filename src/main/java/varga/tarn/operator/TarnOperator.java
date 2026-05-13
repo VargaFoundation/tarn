@@ -153,6 +153,10 @@ public class TarnOperator {
                         }
                         break;
                     case DELETED:
+                        // The reconciler's finalizer drives cleanup on the deletion path —
+                        // by the time this event fires the dependent resources are gone. Run
+                        // cleanup() anyway as a safety net for legacy CRs that never got the
+                        // finalizer attached (idempotent: delete-by-name is a no-op when absent).
                         reconciler.cleanup(cr.getMetadata().getNamespace(), cr.getMetadata().getName());
                         break;
                     case ERROR:

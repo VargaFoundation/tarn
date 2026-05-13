@@ -70,6 +70,12 @@ public class TritonDeploymentReconciler {
     public static final String LABEL_COMPONENT = "tarn.varga.io/component";
     public static final String LABEL_VARIANT = "tarn.varga.io/variant";
     public static final String COMPONENT_TRITON = "triton";
+    /**
+     * Finalizer keeping the CR alive until {@link #cleanup} has run. Without it the
+     * apiserver removes the CR as soon as {@code kubectl delete td} is called, leaving
+     * dependent Deployments/Services orphaned if the operator pod crashes mid-cleanup.
+     */
+    public static final String FINALIZER = "tarn.varga.io/operator-cleanup";
 
     private final KubernetesClient client;
     private final TarnEvents events;
@@ -88,6 +94,16 @@ public class TritonDeploymentReconciler {
     /**
      * Brings the cluster to the desired state for a single CR. Idempotent: safe to call on
      * every event. Returns the new status to be written back on the CR.
+     *
+     * <p>Two execution paths:
+     * <ul>
+     *   <li>{@code deletionTimestamp == null}: ensure the finalizer is present, then run the
+     *       normal create/update reconciliation.</li>
+     *   <li>{@code deletionTimestamp != null}: run {@link #cleanup} (cascading delete on
+     *       Deployments/Services), then strip the finalizer so the apiserver finishes the
+     *       CR removal. The status returned reports {@code Terminating} until cleanup
+     *       finishes.</li>
+     * </ul>
      */
     public TritonDeploymentStatus reconcile(TritonDeployment cr) {
         String name = cr.getMetadata().getName();
@@ -96,9 +112,34 @@ public class TritonDeploymentReconciler {
         TritonDeploymentStatus status = cr.getStatus() == null
                 ? new TritonDeploymentStatus() : cr.getStatus();
         status.setObservedGeneration(cr.getMetadata().getGeneration());
-        status.setTargetReplicas(spec.effectiveReplicas());
+        status.setTargetReplicas(spec == null ? 0 : spec.effectiveReplicas());
 
-        if (spec.getImage() == null || spec.getImage().isEmpty()
+        // Deletion path: do cleanup under the finalizer so it survives operator restarts.
+        if (cr.getMetadata().getDeletionTimestamp() != null) {
+            try {
+                cleanup(ns, name);
+                removeFinalizer(cr);
+                events.normal(cr, "Finalized", "Cleanup complete, releasing finalizer");
+            } catch (Exception e) {
+                log.error("Cleanup failed for {}/{}: {}", ns, name, e.getMessage(), e);
+                events.warning(cr, "CleanupError", "%s: %s",
+                        e.getClass().getSimpleName(), e.getMessage());
+                status.setPhase(TritonDeploymentStatus.PHASE_TERMINATING);
+                replaceCondition(status, "Ready", "False", "CleanupError",
+                        e.getClass().getSimpleName() + ": " + e.getMessage());
+                return status;
+            }
+            status.setPhase(TritonDeploymentStatus.PHASE_TERMINATING);
+            replaceCondition(status, "Ready", "False", "Finalizing",
+                    "Cleanup complete, awaiting apiserver removal");
+            return status;
+        }
+
+        // Ensure the finalizer is present before doing any external work so a delete
+        // received during reconciliation still goes through the cleanup path.
+        ensureFinalizer(cr);
+
+        if (spec == null || spec.getImage() == null || spec.getImage().isEmpty()
                 || spec.getModelRepository() == null || spec.getModelRepository().isEmpty()) {
             status.setPhase(TritonDeploymentStatus.PHASE_FAILED);
             status.getConditions().add(new TritonDeploymentStatus.Condition(
@@ -196,6 +237,37 @@ public class TritonDeploymentReconciler {
                 .withLabel(LABEL_INSTANCE, name).delete();
         client.services().inNamespace(namespace).withName(name).delete();
         log.info("Cleaned up resources for {}/{}", namespace, name);
+    }
+
+    private void ensureFinalizer(TritonDeployment cr) {
+        List<String> existing = cr.getMetadata().getFinalizers();
+        if (existing != null && existing.contains(FINALIZER)) return;
+        List<String> updated = existing == null ? new ArrayList<>() : new ArrayList<>(existing);
+        updated.add(FINALIZER);
+        cr.getMetadata().setFinalizers(updated);
+        try {
+            client.resources(TritonDeployment.class)
+                    .inNamespace(cr.getMetadata().getNamespace())
+                    .resource(cr)
+                    .update();
+        } catch (Exception e) {
+            // Non-fatal: the next reconcile tick will retry. We must not abort reconciliation
+            // just because the finalizer patch raced with another writer.
+            log.warn("Failed to set finalizer on {}/{}: {}",
+                    cr.getMetadata().getNamespace(), cr.getMetadata().getName(), e.getMessage());
+        }
+    }
+
+    private void removeFinalizer(TritonDeployment cr) {
+        List<String> existing = cr.getMetadata().getFinalizers();
+        if (existing == null || !existing.contains(FINALIZER)) return;
+        List<String> updated = new ArrayList<>(existing);
+        updated.remove(FINALIZER);
+        cr.getMetadata().setFinalizers(updated);
+        client.resources(TritonDeployment.class)
+                .inNamespace(cr.getMetadata().getNamespace())
+                .resource(cr)
+                .update();
     }
 
     /**

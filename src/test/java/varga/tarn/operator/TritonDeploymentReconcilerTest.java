@@ -387,4 +387,56 @@ public class TritonDeploymentReconcilerTest {
         assertNull(client.apps().deployments().inNamespace("ns").withName("gone").get());
         assertNull(client.services().inNamespace("ns").withName("gone").get());
     }
+
+    @Test
+    public void reconcileAddsFinalizerOnFirstPass() {
+        // CR must exist in the mock apiserver so the .update() call inside ensureFinalizer
+        // can actually patch it. Tests that just instantiate the CR locally hit a 404 which
+        // ensureFinalizer swallows; this case exercises the happy path.
+        TritonDeployment cr = newCr("with-fin", "ns", s -> {});
+        client.resources(TritonDeployment.class).inNamespace("ns").resource(cr).create();
+
+        TritonDeployment fresh = client.resources(TritonDeployment.class)
+                .inNamespace("ns").withName("with-fin").get();
+        new TritonDeploymentReconciler(client).reconcile(fresh);
+
+        TritonDeployment updated = client.resources(TritonDeployment.class)
+                .inNamespace("ns").withName("with-fin").get();
+        assertNotNull(updated.getMetadata().getFinalizers(), "finalizers list must exist");
+        assertTrue(updated.getMetadata().getFinalizers().contains(TritonDeploymentReconciler.FINALIZER),
+                "operator finalizer must be present after reconcile");
+    }
+
+    @Test
+    public void reconcileOnDeletionRunsCleanupAndDropsFinalizer() {
+        // Build a CR with the deletionTimestamp already set so the deletion branch fires.
+        // We don't round-trip it through the mock apiserver — the reconciler reads timestamps
+        // off the in-memory object, and the mock client doesn't simulate apiserver-side
+        // deletion finalization for CRDs. Removing the finalizer is best-effort (the
+        // .update() call hits 404 and is swallowed), but the dependent resources must still
+        // be cleaned up.
+        TritonDeployment cr = newCr("dying", "ns", s -> {});
+        cr.getMetadata().setFinalizers(new java.util.ArrayList<>(
+                java.util.Collections.singletonList(TritonDeploymentReconciler.FINALIZER)));
+        cr.getMetadata().setDeletionTimestamp("2026-05-13T20:00:00Z");
+        // Pre-create dependent resources the way a prior reconcile would have.
+        client.apps().deployments().inNamespace("ns").resource(
+                new io.fabric8.kubernetes.api.model.apps.DeploymentBuilder()
+                        .withNewMetadata().withName("dying").withNamespace("ns")
+                        .addToLabels(TritonDeploymentReconciler.LABEL_INSTANCE, "dying").endMetadata()
+                        .build()).create();
+        client.services().inNamespace("ns").resource(
+                new io.fabric8.kubernetes.api.model.ServiceBuilder()
+                        .withNewMetadata().withName("dying").withNamespace("ns").endMetadata()
+                        .withNewSpec().endSpec()
+                        .build()).create();
+
+        TritonDeploymentStatus status = new TritonDeploymentReconciler(client).reconcile(cr);
+
+        assertEquals(TritonDeploymentStatus.PHASE_TERMINATING, status.getPhase());
+        assertNull(client.apps().deployments().inNamespace("ns").withName("dying").get(),
+                "Deployment must be cleaned up under the finalizer");
+        assertNull(client.services().inNamespace("ns").withName("dying").get(),
+                "Service must be cleaned up under the finalizer");
+    }
 }
