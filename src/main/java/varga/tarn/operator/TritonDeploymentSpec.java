@@ -102,24 +102,69 @@ public class TritonDeploymentSpec {
     public static class Accelerator {
         private String type = "nvidia_gpu";
         private Integer count = 1;
+        /**
+         * MIG profile for NVIDIA GPUs (e.g. {@code 1g.5gb}, {@code 2g.10gb}). When set, the
+         * pod requests the corresponding {@code nvidia.com/mig-<profile>} resource exposed
+         * by the NVIDIA device plugin. Mutually exclusive with {@link #sliceSize}.
+         */
+        private String profile;
+        /**
+         * Fractional GPU slice for time-slicing / MPS (e.g. "0.5"). Reserved for backends
+         * that support fractional allocation through their own device plugin; the value is
+         * passed through into a pod annotation rather than a resource quantity since K8s
+         * resource quantities are integers.
+         */
         private String sliceSize;
+
         public String getType() { return type; }
         public void setType(String type) { this.type = type; }
         public Integer getCount() { return count; }
         public void setCount(Integer c) { this.count = c; }
+        public String getProfile() { return profile; }
+        public void setProfile(String p) { this.profile = p; }
         public String getSliceSize() { return sliceSize; }
         public void setSliceSize(String s) { this.sliceSize = s; }
 
-        /** K8s resource name for the configured accelerator type. Null means CPU-only. */
+        /**
+         * K8s resource name for the configured accelerator type. Null means CPU-only.
+         * When {@code type=nvidia_gpu} and {@code profile} is set, the resource name is the
+         * NVIDIA device plugin's MIG-flavoured name (e.g. {@code nvidia.com/mig-1g.5gb}).
+         */
         public String kubernetesResourceName() {
-            if (type == null) return "nvidia.com/gpu";
+            if (type == null) return migOrPlain(null);
             switch (type) {
                 case "amd_gpu": return "amd.com/gpu";
                 case "intel_gaudi": return "habana.ai/gaudi";
                 case "aws_neuron": return "aws.amazon.com/neuron";
                 case "cpu_only": return null;
                 case "nvidia_gpu":
-                default: return "nvidia.com/gpu";
+                default: return migOrPlain(profile);
+            }
+        }
+
+        private static String migOrPlain(String profile) {
+            if (profile != null && !profile.isEmpty()) {
+                return "nvidia.com/mig-" + profile;
+            }
+            return "nvidia.com/gpu";
+        }
+
+        /**
+         * Validates that mutually-exclusive fields are not both set, and that {@code profile}
+         * is only used with NVIDIA. Throws {@link IllegalArgumentException} on misuse so
+         * the reconciler surfaces {@code InvalidSpec} instead of trying to allocate a bogus
+         * resource.
+         */
+        public void validate() {
+            boolean hasProfile = profile != null && !profile.isEmpty();
+            boolean hasSlice = sliceSize != null && !sliceSize.isEmpty();
+            if (hasProfile && hasSlice) {
+                throw new IllegalArgumentException(
+                        "accelerator.profile and accelerator.sliceSize are mutually exclusive");
+            }
+            if (hasProfile && !"nvidia_gpu".equals(type == null ? "nvidia_gpu" : type)) {
+                throw new IllegalArgumentException(
+                        "accelerator.profile is only supported when type=nvidia_gpu");
             }
         }
     }

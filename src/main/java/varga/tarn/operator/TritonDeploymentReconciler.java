@@ -745,6 +745,7 @@ public class TritonDeploymentReconciler {
         requests.put("cpu", new Quantity(r.getCpu()));
         Map<String, Quantity> limits = new LinkedHashMap<>(requests);
         TritonDeploymentSpec.Accelerator acc = spec.effectiveAccelerator();
+        acc.validate();
         String accelResource = acc.kubernetesResourceName();
         if (accelResource != null) {
             int accelCount = acc.getCount() == null ? 1 : acc.getCount();

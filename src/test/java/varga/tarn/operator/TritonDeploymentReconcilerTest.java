@@ -109,6 +109,39 @@ public class TritonDeploymentReconcilerTest {
     }
 
     @Test
+    public void migProfileRoutesToMigResource() {
+        TritonDeployment cr = newCr("mig-llama", "ns", s -> {
+            TritonDeploymentSpec.Accelerator a = new TritonDeploymentSpec.Accelerator();
+            a.setType("nvidia_gpu");
+            a.setProfile("2g.10gb");
+            a.setCount(2);
+            s.setAccelerator(a);
+        });
+        new TritonDeploymentReconciler(client).reconcile(cr);
+
+        Deployment d = client.apps().deployments().inNamespace("ns").withName("mig-llama").get();
+        var reqs = d.getSpec().getTemplate().getSpec().getContainers().get(0).getResources();
+        // MIG profile changes the resource name; count remains the multiplier.
+        assertEquals("2", reqs.getLimits().get("nvidia.com/mig-2g.10gb").getAmount());
+        assertNull(reqs.getLimits().get("nvidia.com/gpu"),
+                "plain nvidia.com/gpu must not be requested when profile is set");
+    }
+
+    @Test
+    public void acceleratorRejectsProfileWithSliceSize() {
+        TritonDeployment cr = newCr("bad", "ns", s -> {
+            TritonDeploymentSpec.Accelerator a = new TritonDeploymentSpec.Accelerator();
+            a.setType("nvidia_gpu");
+            a.setProfile("1g.5gb");
+            a.setSliceSize("0.5");
+            s.setAccelerator(a);
+        });
+        TritonDeploymentStatus status = new TritonDeploymentReconciler(client).reconcile(cr);
+        assertEquals(TritonDeploymentStatus.PHASE_DEGRADED, status.getPhase(),
+                "spec with mutually-exclusive accelerator fields must land in Degraded");
+    }
+
+    @Test
     public void cpuOnlyDoesNotRequestAccelerators() {
         TritonDeployment cr = newCr("cpu", "ns", s -> {
             TritonDeploymentSpec.Accelerator a = new TritonDeploymentSpec.Accelerator();
