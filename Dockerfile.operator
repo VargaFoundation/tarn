@@ -19,9 +19,13 @@ RUN chmod +x mvnw && ./mvnw clean package -DskipTests -B -Poperator
 
 FROM eclipse-temurin:17-jre-jammy
 
-WORKDIR /app
-COPY --from=build /app/target/tarn-orchestrator-*.jar app.jar
-COPY --from=build /app/target/operator-libs/ lib/
+# Non-root user matching helm/values.yaml runAsUser=10000.
+RUN useradd --uid 10000 --create-home --shell /sbin/nologin tarn
 
+WORKDIR /app
+COPY --from=build --chown=tarn:tarn /app/target/tarn-orchestrator-*.jar app.jar
+COPY --from=build --chown=tarn:tarn /app/target/operator-libs/ lib/
+
+USER 10000
 # Classpath: the shaded main JAR first (our code), then the operator libs.
 ENTRYPOINT ["java", "-cp", "app.jar:lib/*", "varga.tarn.operator.TarnOperator"]
