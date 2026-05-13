@@ -51,6 +51,7 @@ import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
@@ -72,6 +73,11 @@ public class ApplicationMaster {
     private MetricsCollector metricsCollector;
     private ScalingPolicy scalingPolicy;
     private final List<Container> runningContainers = Collections.synchronizedList(new ArrayList<>());
+    // Container ids whose Triton has answered /v2/health/ready at least once. Routers
+    // (OpenAI proxy, dashboard) consult this to avoid pointing traffic at a backend that
+    // is still warming up. The set is maintained from runWarmupThenRegister and pruned
+    // in onContainersCompleted.
+    private final Set<ContainerId> readyContainerIds = ConcurrentHashMap.newKeySet();
     private final AtomicInteger targetNumContainers = new AtomicInteger(1);
     private final AtomicLong allocationRequestIdCounter = new AtomicLong(0);
 
@@ -164,6 +170,9 @@ public class ApplicationMaster {
             log.info("Recovered {} containers from previous attempt", previousContainers.size());
             for (Container c : previousContainers) {
                 runningContainers.add(c);
+                // Recovered containers were already serving traffic prior to the AM restart;
+                // treat them as ready so routers do not refuse traffic until the next warmup tick.
+                readyContainerIds.add(c.getId());
                 registerInZooKeeper(c);
             }
         }
@@ -629,6 +638,7 @@ public class ApplicationMaster {
                 metricsCollector.recordAlert("warmup_ok",
                         "Container " + cid + " ready after " + took + "ms",
                         "info");
+                readyContainerIds.add(container.getId());
                 registerInZooKeeper(container);
                 return;
             }
@@ -922,6 +932,7 @@ public class ApplicationMaster {
                             "Exit status: " + status.getExitStatus() + ", " + status.getDiagnostics());
                 }
                 runningContainers.removeIf(c -> c.getId().equals(status.getContainerId()));
+                readyContainerIds.remove(status.getContainerId());
                 unregisterFromZooKeeper(status.getContainerId());
             }
         }
@@ -1004,6 +1015,16 @@ public class ApplicationMaster {
 
     public List<Container> getRunningContainers() {
         return runningContainers;
+    }
+
+    /**
+     * Returns true once the AM has observed {@code /v2/health/ready} succeed at least once for
+     * this container, or the container was recovered from a previous AM attempt (i.e. it was
+     * already serving traffic before the restart). Routers must consult this to avoid
+     * proxying to a backend that has not yet finished loading its models.
+     */
+    public boolean isContainerReady(ContainerId id) {
+        return id != null && readyContainerIds.contains(id);
     }
 
     public List<String> getAvailableModels() {

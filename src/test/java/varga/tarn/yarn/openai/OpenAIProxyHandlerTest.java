@@ -114,6 +114,10 @@ public class OpenAIProxyHandlerTest {
         when(mockAm.getMetricsCollector()).thenReturn(metrics);
         when(mockAm.getRangerAuthorizer()).thenReturn(mockRanger);
         when(mockAm.getAvailableModels()).thenReturn(List.of("llama-3-70b", "stable-diffusion"));
+        // Mark the synthetic container as ready so the proxy considers it a valid target.
+        // Production code only marks a container ready after a successful /v2/health/ready
+        // warmup probe; tests bypass the network call.
+        when(mockAm.isContainerReady(cid)).thenReturn(true);
 
         // 3. Proxy config: use the fake Triton port as tritonPort.
         config = new TarnConfig();

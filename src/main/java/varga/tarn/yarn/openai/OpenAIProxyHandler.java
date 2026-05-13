@@ -458,8 +458,11 @@ public class OpenAIProxyHandler implements HttpHandler {
     }
 
     /**
-     * Selects the container with the smallest reported queue depth. Ties are broken
-     * alphabetically by host for deterministic behaviour in tests.
+     * Selects the ready container with the smallest reported queue depth. Containers that
+     * have not yet passed Triton's {@code /v2/health/ready} (tracked by the AM warmup loop)
+     * are skipped — otherwise we would route inference at a backend that still returns
+     * connection-refused or 503. Ties are broken alphabetically by host for deterministic
+     * behaviour in tests.
      */
     private Container pickLeastLoadedReadyContainer() {
         List<Container> containers = am.getRunningContainers();
@@ -468,6 +471,9 @@ public class OpenAIProxyHandler implements HttpHandler {
         int bestDepth = Integer.MAX_VALUE;
         synchronized (containers) {
             for (Container c : containers) {
+                if (!am.isContainerReady(c.getId())) {
+                    continue;
+                }
                 int depth = mc.getQueueDepth(c.getId().toString());
                 if (depth < bestDepth
                         || (depth == bestDepth && best != null
