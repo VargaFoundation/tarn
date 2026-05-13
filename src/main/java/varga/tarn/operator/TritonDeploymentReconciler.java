@@ -39,6 +39,7 @@ import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
 import io.fabric8.kubernetes.api.model.apps.DeploymentStatus;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.KubernetesClientException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,6 +47,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Reconciles a {@link TritonDeployment} CR into a native K8s Deployment + Service pair.
@@ -556,33 +558,62 @@ public class TritonDeploymentReconciler {
      * Create the Deployment or replace it if it already exists. We don't rely on SSA because
      * the fabric8 mock server in tests doesn't implement it, and older real clusters (&lt;1.22)
      * don't either. A read-then-create-or-replace is explicit and universally supported.
+     *
+     * <p>If the {@code update()} hits an HTTP 409 conflict (another writer raced us), we
+     * re-fetch and retry up to 3 times. Without this a benign race (kubectl edit, HPA,
+     * another operator pod during failover) would flip the CR into {@code Degraded}.
      */
     private void applyDeployment(String ns, Deployment desired) {
-        var ops = client.apps().deployments().inNamespace(ns).withName(desired.getMetadata().getName());
-        Deployment existing = ops.get();
-        if (existing == null) {
-            client.apps().deployments().inNamespace(ns).resource(desired).create();
-        } else {
-            // Preserve server-assigned fields we shouldn't stomp on.
-            desired.getMetadata().setResourceVersion(existing.getMetadata().getResourceVersion());
-            client.apps().deployments().inNamespace(ns).resource(desired).update();
-        }
+        retryOnConflict(() -> {
+            var ops = client.apps().deployments().inNamespace(ns).withName(desired.getMetadata().getName());
+            Deployment existing = ops.get();
+            if (existing == null) {
+                client.apps().deployments().inNamespace(ns).resource(desired).create();
+            } else {
+                // Preserve server-assigned fields we shouldn't stomp on.
+                desired.getMetadata().setResourceVersion(existing.getMetadata().getResourceVersion());
+                client.apps().deployments().inNamespace(ns).resource(desired).update();
+            }
+            return null;
+        });
     }
 
     private void applyService(String ns, Service desired) {
-        var ops = client.services().inNamespace(ns).withName(desired.getMetadata().getName());
-        Service existing = ops.get();
-        if (existing == null) {
-            client.services().inNamespace(ns).resource(desired).create();
-        } else {
-            desired.getMetadata().setResourceVersion(existing.getMetadata().getResourceVersion());
-            // ClusterIP, once assigned, must be preserved to avoid a validation error.
-            if (desired.getSpec() != null && existing.getSpec() != null) {
-                desired.getSpec().setClusterIP(existing.getSpec().getClusterIP());
-                desired.getSpec().setClusterIPs(existing.getSpec().getClusterIPs());
+        retryOnConflict(() -> {
+            var ops = client.services().inNamespace(ns).withName(desired.getMetadata().getName());
+            Service existing = ops.get();
+            if (existing == null) {
+                client.services().inNamespace(ns).resource(desired).create();
+            } else {
+                desired.getMetadata().setResourceVersion(existing.getMetadata().getResourceVersion());
+                // ClusterIP, once assigned, must be preserved to avoid a validation error.
+                if (desired.getSpec() != null && existing.getSpec() != null) {
+                    desired.getSpec().setClusterIP(existing.getSpec().getClusterIP());
+                    desired.getSpec().setClusterIPs(existing.getSpec().getClusterIPs());
+                }
+                client.services().inNamespace(ns).resource(desired).update();
             }
-            client.services().inNamespace(ns).resource(desired).update();
+            return null;
+        });
+    }
+
+    /**
+     * Runs {@code action} and retries up to 3 times on HTTP 409 (resource version conflict).
+     * Each retry re-fetches the latest version, so the caller's {@code action} must do
+     * read-modify-write inside the supplier. Other exceptions propagate immediately.
+     */
+    private static <T> T retryOnConflict(Supplier<T> action) {
+        KubernetesClientException last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                return action.get();
+            } catch (KubernetesClientException e) {
+                if (e.getCode() != 409) throw e;
+                last = e;
+                log.warn("Conflict on attempt {}/3, retrying: {}", attempt, e.getMessage());
+            }
         }
+        throw last;
     }
 
     // ----------------------------------------------------------------------

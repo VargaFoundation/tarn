@@ -40,7 +40,12 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -178,7 +183,9 @@ public class TarnOperator {
 
     /**
      * Start watching CRs; returns the Watch so leader-election callbacks can close it when
-     * leadership is lost.
+     * leadership is lost. Failed reconciles are requeued with exponential backoff via the
+     * shared {@link #requeueExecutor} so a transient apiserver hiccup doesn't strand the CR
+     * in {@code Degraded} until the next manual edit.
      */
     Watch startWatch(KubernetesClient client, String namespace) {
         TritonDeploymentReconciler reconciler = new TritonDeploymentReconciler(client);
@@ -187,21 +194,24 @@ public class TarnOperator {
                 ? typedOps.inAnyNamespace()
                 : typedOps.inNamespace(namespace);
 
+        // Per-CR backoff state. Cleared on a successful reconcile or on DELETED.
+        ConcurrentMap<String, Integer> attempts = new ConcurrentHashMap<>();
+
         return watched.watch(new Watcher<TritonDeployment>() {
             @Override
             public void eventReceived(Action action, TritonDeployment cr) {
-                String id = cr.getMetadata().getNamespace() + "/" + cr.getMetadata().getName();
+                String ns = cr.getMetadata().getNamespace();
+                String name = cr.getMetadata().getName();
+                String id = ns + "/" + name;
                 switch (action) {
                     case ADDED:
                     case MODIFIED:
-                        try {
-                            TritonDeploymentStatus newStatus = reconciler.reconcile(cr);
-                            cr.setStatus(newStatus);
-                            typedOps.inNamespace(cr.getMetadata().getNamespace())
-                                    .resource(cr)
-                                    .updateStatus();
-                        } catch (Exception e) {
-                            log.warn("Status update failed for {}: {}", id, e.getMessage());
+                        boolean ok = reconcileOnce(reconciler, typedOps, cr, id);
+                        if (ok) {
+                            attempts.remove(id);
+                        } else {
+                            int attempt = attempts.merge(id, 1, Integer::sum);
+                            scheduleRequeue(client, reconciler, typedOps, ns, name, id, attempt, attempts);
                         }
                         break;
                     case DELETED:
@@ -209,7 +219,8 @@ public class TarnOperator {
                         // by the time this event fires the dependent resources are gone. Run
                         // cleanup() anyway as a safety net for legacy CRs that never got the
                         // finalizer attached (idempotent: delete-by-name is a no-op when absent).
-                        reconciler.cleanup(cr.getMetadata().getNamespace(), cr.getMetadata().getName());
+                        reconciler.cleanup(ns, name);
+                        attempts.remove(id);
                         break;
                     case ERROR:
                     case BOOKMARK:
@@ -229,6 +240,74 @@ public class TarnOperator {
             }
         });
     }
+
+    /**
+     * Runs one reconcile + status write. Returns true on success, false on any thrown
+     * exception (caller decides whether to requeue). The status-update failure path is
+     * treated as a soft failure — the next tick will try again.
+     */
+    private boolean reconcileOnce(TritonDeploymentReconciler reconciler,
+                                  io.fabric8.kubernetes.client.dsl.MixedOperation<
+                                          TritonDeployment, ?, ?> typedOps,
+                                  TritonDeployment cr, String id) {
+        try {
+            TritonDeploymentStatus newStatus = reconciler.reconcile(cr);
+            cr.setStatus(newStatus);
+            typedOps.inNamespace(cr.getMetadata().getNamespace())
+                    .resource(cr)
+                    .updateStatus();
+            return !TritonDeploymentStatus.PHASE_DEGRADED.equals(newStatus.getPhase());
+        } catch (Exception e) {
+            log.warn("Reconcile failed for {}: {}", id, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Re-fetches the CR and runs another reconcile after an exponentially backed-off delay.
+     * Without this requeue path, a single transient error (apiserver 5xx, network blip)
+     * strands the CR in Degraded until a human edits it.
+     */
+    private void scheduleRequeue(KubernetesClient client, TritonDeploymentReconciler reconciler,
+                                 io.fabric8.kubernetes.client.dsl.MixedOperation<
+                                         TritonDeployment, ?, ?> typedOps,
+                                 String ns, String name, String id, int attempt,
+                                 ConcurrentMap<String, Integer> attempts) {
+        if (requeueExecutor == null) return; // Operator shutting down.
+        long delaySec = Math.min(60L, (long) Math.pow(2, Math.min(attempt, 6)));
+        log.info("Requeue {} attempt {} in {}s", id, attempt, delaySec);
+        requeueExecutor.schedule(() -> {
+            TritonDeployment fresh = client.resources(TritonDeployment.class)
+                    .inNamespace(ns).withName(name).get();
+            if (fresh == null) {
+                // CR removed in the meantime; cleanup() in the DELETED branch handles it.
+                attempts.remove(id);
+                return;
+            }
+            boolean ok = reconcileOnce(reconciler, typedOps, fresh, id);
+            if (ok) {
+                attempts.remove(id);
+            } else if (attempt < 6) {
+                int next = attempts.merge(id, 1, Integer::sum);
+                scheduleRequeue(client, reconciler, typedOps, ns, name, id, next, attempts);
+            } else {
+                log.error("Gave up requeuing {} after {} attempts — manual intervention needed",
+                        id, attempt);
+                attempts.remove(id);
+            }
+        }, delaySec, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Shared executor for requeues — single-threaded to keep the order deterministic. Lazy
+     * init so tests that call {@link #startWatch} directly don't need a tear-down.
+     */
+    private volatile ScheduledExecutorService requeueExecutor =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "tarn-operator-requeue");
+                t.setDaemon(true);
+                return t;
+            });
 
     /**
      * Legacy single-leader entrypoint — blocks on an internal latch until the watch closes.
