@@ -110,7 +110,8 @@ public class ApplicationMaster {
                 config.minContainers,
                 config.maxContainers,
                 config.scaleCooldownMs,
-                LoadSignal.ScalingMode.parse(config.scaleMode)
+                LoadSignal.ScalingMode.parse(config.scaleMode),
+                config.scaleStabilityWindow
         );
         this.targetNumContainers.set(config.minContainers);
     }

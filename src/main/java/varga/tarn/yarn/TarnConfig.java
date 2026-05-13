@@ -100,6 +100,13 @@ public class TarnConfig {
     public int minContainers;
     public int maxContainers;
     public long scaleCooldownMs;
+    /**
+     * Stability window for the autoscaler: number of consecutive monitor ticks the load
+     * must stay above (or below) a threshold before triggering. {@code 1} keeps the
+     * historical immediate-fire behaviour; values of 2-3 reduce flapping when the load
+     * grazes a threshold for a single tick.
+     */
+    public int scaleStabilityWindow;
 
     public TarnConfig() {
         // Defaults from environment or static defaults
@@ -159,6 +166,7 @@ public class TarnConfig {
         minContainers = Integer.parseInt(getEnv("MIN_CONTAINERS", "1"));
         maxContainers = Integer.parseInt(getEnv("MAX_CONTAINERS", "10"));
         scaleCooldownMs = Long.parseLong(getEnv("SCALE_COOLDOWN_MS", "60000"));
+        scaleStabilityWindow = Integer.parseInt(getEnv("SCALE_STABILITY_WINDOW", "1"));
     }
 
     private String getEnv(String key, String defaultValue) {
@@ -209,6 +217,7 @@ public class TarnConfig {
         if (line.hasOption("min-instances")) minContainers = Integer.parseInt(line.getOptionValue("min-instances"));
         if (line.hasOption("max-instances")) maxContainers = Integer.parseInt(line.getOptionValue("max-instances"));
         if (line.hasOption("cooldown")) scaleCooldownMs = Long.parseLong(line.getOptionValue("cooldown"));
+        if (line.hasOption("scale-stability-window")) scaleStabilityWindow = Integer.parseInt(line.getOptionValue("scale-stability-window"));
         if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
         if (line.hasOption("ranger-strict")) rangerStrict = true;
         if (line.hasOption("zk-required")) zkRequired = true;
@@ -250,6 +259,7 @@ public class TarnConfig {
         if (maxContainers < minContainers) throw new IllegalArgumentException("maxContainers < minContainers");
         if (scaleUpThreshold <= 0 || scaleUpThreshold > 1.0) throw new IllegalArgumentException("scaleUpThreshold must be in (0, 1]");
         if (scaleDownThreshold < 0 || scaleDownThreshold >= scaleUpThreshold) throw new IllegalArgumentException("scaleDownThreshold must be in [0, scaleUpThreshold)");
+        if (scaleStabilityWindow < 1) throw new IllegalArgumentException("scaleStabilityWindow must be >= 1");
         if (tlsEnabled && (tlsKeystorePath == null || tlsKeystorePath.isEmpty())) {
             throw new IllegalArgumentException("--tls-enabled requires --tls-keystore");
         }
@@ -332,6 +342,8 @@ public class TarnConfig {
         options.addOption("min", "min-instances", true, "Minimum number of instances");
         options.addOption("max", "max-instances", true, "Maximum number of instances");
         options.addOption("c", "cooldown", true, "Scale cooldown in ms");
+        options.addOption(null, "scale-stability-window", true,
+                "Consecutive monitor ticks the load must stay past a threshold before scaling (default 1)");
         options.addOption("cp", "client-port", true, "Client health endpoint port (default: 8889)");
         return options;
     }

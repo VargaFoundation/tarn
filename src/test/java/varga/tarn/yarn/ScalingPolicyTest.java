@@ -81,4 +81,25 @@ public class ScalingPolicyTest {
         LoadSignal s = new LoadSignal(0.1, 40, 0.0, 2, 16); // queue per=20, norm=1.0
         assertEquals(2, policy.calculateTarget(1, s));
     }
+
+    @Test
+    public void stabilityWindowRequiresConsecutiveSamples() {
+        // window=2 means a single grazing tick must NOT scale.
+        ScalingPolicy policy = new ScalingPolicy(0.7, 0.2, 1, 10, 0,
+                LoadSignal.ScalingMode.COMPOSITE, 2);
+        assertEquals(1, policy.calculateTarget(1, 0.8), "first tick above must not fire");
+        assertEquals(2, policy.calculateTarget(1, 0.8), "second consecutive tick fires");
+    }
+
+    @Test
+    public void stabilityWindowResetsOnDeadZone() {
+        // A tick that lands in the dead zone wipes the counter so a transient spike doesn't
+        // accumulate across long quiet periods.
+        ScalingPolicy policy = new ScalingPolicy(0.7, 0.2, 1, 10, 0,
+                LoadSignal.ScalingMode.COMPOSITE, 2);
+        assertEquals(1, policy.calculateTarget(1, 0.8));
+        assertEquals(1, policy.calculateTarget(1, 0.5), "dead zone resets the trend");
+        assertEquals(1, policy.calculateTarget(1, 0.8), "single tick post-reset must not fire");
+        assertEquals(2, policy.calculateTarget(1, 0.8));
+    }
 }
