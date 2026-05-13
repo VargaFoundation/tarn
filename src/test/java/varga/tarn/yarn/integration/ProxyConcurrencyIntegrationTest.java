@@ -101,6 +101,10 @@ public class ProxyConcurrencyIntegrationTest {
         when(mockAm.getMetricsCollector()).thenReturn(metrics);
         when(mockAm.getRangerAuthorizer()).thenReturn(ranger);
         when(mockAm.getAvailableModels()).thenReturn(List.of("m"));
+        // Mark the synthetic container as ready so the proxy considers it routable.
+        // In production, the AM marks containers ready after their first successful
+        // /v2/health/ready probe; tests bypass the network call.
+        when(mockAm.isContainerReady(cid)).thenReturn(true);
         quotaEnforcer = new QuotaEnforcer();
         when(mockAm.getQuotaEnforcer()).thenReturn(quotaEnforcer);
 
