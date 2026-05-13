@@ -152,9 +152,11 @@ public class TritonCommandBuilder {
     }
 
     private String getCommonArgs(int httpPort, int grpcPort, int metricsPort, String bindAddress) {
+        // gpu-metrics must stay enabled: MetricsCollector parses nv_gpu_utilization /
+        // nv_gpu_memory_used_bytes and the AM re-exports them as tarn_gpu_* for Prometheus.
         return String.format("--http-port %d --grpc-port %d --metrics-port %d " +
                         "--http-address %s --metrics-address %s " +
-                        "--allow-cpu-metrics false --allow-gpu-metrics false --allow-metrics true " +
+                        "--allow-cpu-metrics false --allow-gpu-metrics true --allow-metrics true " +
                         "--metrics-interval-ms 1000 --model-load-thread-count 2 --strict-readiness true ",
                 httpPort, grpcPort, metricsPort, bindAddress, bindAddress);
     }
