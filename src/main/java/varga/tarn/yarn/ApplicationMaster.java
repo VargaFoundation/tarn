@@ -436,6 +436,22 @@ public class ApplicationMaster {
             metricsCollector.recordScalingEvent("scale_down", currentTarget, newTarget);
             stopExtraContainer();
         }
+
+        // 3. Bound metrics memory by purging models the repository no longer advertises.
+        // Running this every tick is cheap (set-diff over the model index) and prevents
+        // long-running AMs from accumulating dead per-model maps after model rotations.
+        try {
+            Set<String> liveModels = new HashSet<>(getAvailableModels());
+            // LoRA adapters are tracked with "base#adapter" keys; keep those too.
+            for (Map.Entry<String, List<String>> e : getAvailableLoraAdapters().entrySet()) {
+                for (String lora : e.getValue()) {
+                    liveModels.add(e.getKey() + "#" + lora);
+                }
+            }
+            metricsCollector.purgeMissingModels(liveModels);
+        } catch (Exception e) {
+            log.warn("Model purge skipped: {}", e.getMessage());
+        }
     }
 
     /**

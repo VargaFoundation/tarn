@@ -300,6 +300,35 @@ public class MetricsCollector {
     }
 
     /**
+     * Drops per-model accounting state for models the AM no longer advertises. Called by
+     * the monitor loop with the current set of model names so long-running deployments
+     * that churn through models (LoRA hot-swap, ephemeral fine-tunes) don't leak maps that
+     * grow unbounded across days.
+     *
+     * <p>The cap on latency samples already bounds memory per model, but the per-model
+     * map entries themselves leak — this method bounds the cardinality.
+     */
+    public int purgeMissingModels(Set<String> livingModels) {
+        if (livingModels == null) return 0;
+        int removed = 0;
+        Set<String> tracked = new HashSet<>(getTrackedModels());
+        for (String m : tracked) {
+            if (livingModels.contains(m)) continue;
+            inferenceLatencies.remove(m);
+            requestCountsByModel.remove(m);
+            errorCountsByModel.remove(m);
+            histogramBucketsByModel.remove(m);
+            histogramSumByModel.remove(m);
+            histogramCountByModel.remove(m);
+            removed++;
+        }
+        if (removed > 0) {
+            log.info("Purged metrics state for {} model(s) no longer advertised", removed);
+        }
+        return removed;
+    }
+
+    /**
      * Validates a host string to prevent SSRF via loopback/link-local/metadata endpoints.
      * Only public unicast / site-local addresses reachable by DNS (or literal IPv4) pass.
      * Result is cached — YARN-provided NodeManager hostnames don't change mid-application.

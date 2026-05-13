@@ -144,4 +144,22 @@ public class MetricsCollectorTest {
         // Sum is in seconds: 0.005 + 0.05 + 0.12 + 0.8 + 4.5 = 5.475
         assertEquals(5.475, collector.getHistogramSum("m"), 1e-9);
     }
+
+    @Test
+    public void purgeMissingModelsDropsState() {
+        MetricsCollector c = new MetricsCollector(8002);
+        c.recordInferenceLatency("alive", 10.0);
+        c.recordInferenceLatency("gone", 20.0);
+        c.recordModelRequest("alive", true);
+        c.recordModelRequest("gone", false);
+
+        int removed = c.purgeMissingModels(java.util.Set.of("alive"));
+        assertEquals(1, removed);
+
+        // The surviving model keeps its samples.
+        assertEquals(1L, c.getHistogramCount("alive"));
+        // The disappeared model is gone — counters reset.
+        assertEquals(0L, c.getHistogramCount("gone"));
+        assertEquals(false, c.getTrackedModels().contains("gone"));
+    }
 }
