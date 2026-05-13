@@ -130,6 +130,10 @@ public class ApplicationMaster {
         rangerAuthorizer = new RangerAuthorizer(config);
         quotaEnforcer = new QuotaEnforcer();
         loadQuotasFromConfig();
+        // Surface the effective Ranger mode in the AM log at startup so operators can verify
+        // what they actually deployed (especially "DISABLED" — easy to misconfigure).
+        log.info("Ranger access-control mode: {} (service={}, strict={})",
+                rangerAuthorizer.getMode(), config.rangerService, config.rangerStrict);
         if (rangerAuthorizer.isDegraded()) {
             String msg = "Ranger plugin requested (service=" + config.rangerService + ") but initialization failed";
             metricsCollector.recordAlert("ranger_degraded", msg,

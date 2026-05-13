@@ -67,11 +67,16 @@
                     <#if zkEnabled>
                         <p class="text-xs text-gray-500 mt-1 truncate">Path: ${zkPath}</p>
                     </#if>
-                    <p class="flex justify-between mt-2"><span>Ranger:</span> 
-                        <#if rangerEnabled>
-                            <span class="text-blue-500 font-semibold">Enabled</span>
+                    <p class="flex justify-between mt-2"><span>Ranger:</span>
+                        <#assign mode = (rangerMode!"DISABLED")>
+                        <#if mode == "ENFORCING">
+                            <span class="text-green-500 font-semibold" title="Plugin loaded, policies enforced per request">Enforcing</span>
+                        <#elseif mode == "DEGRADED_DENY">
+                            <span class="text-red-500 font-semibold" title="Plugin failed to initialize; strict mode denying all requests">Degraded (deny)</span>
+                        <#elseif mode == "DEGRADED_PERMIT">
+                            <span class="text-yellow-500 font-semibold" title="Plugin failed to initialize; non-strict mode allowing all requests">Degraded (permit)</span>
                         <#else>
-                            <span class="text-gray-500">Disabled</span>
+                            <span class="text-gray-500" title="No rangerService configured; allow-all">Disabled</span>
                         </#if>
                     </p>
                 </div>

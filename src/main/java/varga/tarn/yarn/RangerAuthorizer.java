@@ -77,6 +77,28 @@ public class RangerAuthorizer {
         return initFailed;
     }
 
+    /**
+     * Effective access-control mode for operators to inspect at runtime (dashboard, logs,
+     * metrics). One of:
+     * <ul>
+     *   <li>{@code DISABLED} — no rangerService configured, every request is allowed.</li>
+     *   <li>{@code ENFORCING} — plugin loaded, Ranger policies are queried for every request.</li>
+     *   <li>{@code DEGRADED_DENY} — plugin failed to load AND strict mode is on, every
+     *       request is denied (fail-closed for regulated clusters).</li>
+     *   <li>{@code DEGRADED_PERMIT} — plugin failed to load AND strict mode is off, every
+     *       request is allowed (legacy/dev behaviour, explicit choice).</li>
+     * </ul>
+     */
+    public String getMode() {
+        if (initFailed) {
+            return config.rangerStrict ? "DEGRADED_DENY" : "DEGRADED_PERMIT";
+        }
+        if (plugin == null) {
+            return "DISABLED";
+        }
+        return "ENFORCING";
+    }
+
     public boolean isAllowed(String user, Set<String> groups, String action, String model) {
         return isAllowed(user, groups, action, model, null);
     }

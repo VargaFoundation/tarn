@@ -307,6 +307,9 @@ public class DiscoveryServer {
             }
             model.put("availableModels", authorizedModels);
             model.put("rangerEnabled", config.rangerService != null && !config.rangerService.isEmpty());
+            // Surface the effective enforcement mode so operators can spot accidental
+            // "DISABLED" or "DEGRADED_PERMIT" deployments without grepping the log.
+            model.put("rangerMode", am.getRangerAuthorizer().getMode());
 
             // Multi-LoRA: map of base -> list of visible adapters, filtered by Ranger
             // (resource = "base#lora" combined name to allow per-adapter policies).
