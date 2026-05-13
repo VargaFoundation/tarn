@@ -67,6 +67,30 @@ jobs:
           path: target/spotbugsXml.xml
           retention-days: 14
 
+      # OWASP DependencyCheck is wired in pom.xml (failBuildOnCVSS=8, with a suppressions
+      # file) but never ran in CI before. Cache the NVD DB across runs so we don't pay the
+      # 5-10 minute download tax every build. continue-on-error keeps the pipeline green
+      # while we burn down findings; flip to false once the suppression file is curated.
+      - name: Cache OWASP NVD database
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: owasp-nvd-${{ runner.os }}-${{ hashFiles('**/dependency-check-suppressions.xml') }}
+          restore-keys: |
+            owasp-nvd-${{ runner.os }}-
+
+      - name: OWASP DependencyCheck
+        run: ./mvnw dependency-check:check -B
+        continue-on-error: true
+
+      - name: Upload DependencyCheck report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-check-report
+          path: target/dependency-check-report.html
+          retention-days: 14
+
       # --- Docker image ---
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
