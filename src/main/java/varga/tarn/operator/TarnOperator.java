@@ -20,6 +20,7 @@ package varga.tarn.operator;
  * #L%
  */
 
+import com.sun.net.httpserver.HttpServer;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.fabric8.kubernetes.client.Watch;
@@ -34,10 +35,13 @@ import io.fabric8.kubernetes.client.extended.leaderelection.resourcelock.LeaseLo
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -62,25 +66,70 @@ public class TarnOperator {
 
     private static final Logger log = LoggerFactory.getLogger(TarnOperator.class);
 
+    /**
+     * Liveness flips to true once the JVM has finished startup; the apiserver client is
+     * built and we entered the main loop. Stays true until shutdown.
+     */
+    private final AtomicBoolean alive = new AtomicBoolean(false);
+    /**
+     * Readiness mirrors the watch state — true only while a fabric8 Watch is open. In
+     * leader-election mode standby replicas report not-ready so the K8s Service (if any)
+     * routes probes away from them.
+     */
+    private final AtomicBoolean ready = new AtomicBoolean(false);
+
     public static void main(String[] args) {
         String ns = System.getenv("WATCH_NAMESPACE"); // null = all namespaces
         String leaseNs = System.getenv().getOrDefault("LEADER_ELECTION_NAMESPACE",
                 ns == null || ns.isEmpty() ? "default" : ns);
         boolean leaderElection = !"false".equalsIgnoreCase(
                 System.getenv().getOrDefault("LEADER_ELECTION_ENABLED", "true"));
+        int healthPort = Integer.parseInt(
+                System.getenv().getOrDefault("HEALTH_PORT", "8080"));
         try (KubernetesClient client = new KubernetesClientBuilder().build()) {
             log.info("TARN operator starting (watchNamespace={}, leaderElection={}, server={})",
                     ns == null ? "<ALL>" : ns, leaderElection, client.getMasterUrl());
             TarnOperator op = new TarnOperator();
-            if (leaderElection) {
-                op.runWithLeaderElection(client, ns, leaseNs);
-            } else {
-                op.run(client, ns);
+            HttpServer health = op.startHealthServer(healthPort);
+            try {
+                op.alive.set(true);
+                if (leaderElection) {
+                    op.runWithLeaderElection(client, ns, leaseNs);
+                } else {
+                    op.run(client, ns);
+                }
+            } finally {
+                op.alive.set(false);
+                health.stop(0);
             }
         } catch (Exception e) {
             log.error("Operator crashed", e);
             System.exit(1);
         }
+    }
+
+    /**
+     * Tiny HTTP server exposing {@code /healthz} (JVM up) and {@code /readyz} (watch open)
+     * so Kubernetes probes have something to point at. Bound to all interfaces — RBAC and
+     * NetworkPolicy gate access at the cluster level.
+     */
+    HttpServer startHealthServer(int port) throws IOException {
+        HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
+        server.createContext("/healthz", ex -> {
+            int code = alive.get() ? 200 : 503;
+            byte[] body = (alive.get() ? "ok" : "stopped").getBytes();
+            ex.sendResponseHeaders(code, body.length);
+            try (var os = ex.getResponseBody()) { os.write(body); }
+        });
+        server.createContext("/readyz", ex -> {
+            int code = ready.get() ? 200 : 503;
+            byte[] body = (ready.get() ? "ready" : "not-ready").getBytes();
+            ex.sendResponseHeaders(code, body.length);
+            try (var os = ex.getResponseBody()) { os.write(body); }
+        });
+        server.start();
+        log.info("Operator health server listening on :{} (/healthz, /readyz)", port);
+        return server;
     }
 
     /**
@@ -106,12 +155,15 @@ public class TarnOperator {
                                     log.info("Acquired leadership as {}, starting reconcile loop", identity);
                                     try {
                                         watchRef.set(startWatch(client, watchNs));
+                                        ready.set(true);
                                     } catch (Exception e) {
                                         log.error("Failed to start watch after becoming leader", e);
+                                        ready.set(false);
                                     }
                                 },
                                 () -> {
                                     log.warn("Lost leadership, stopping reconcile loop");
+                                    ready.set(false);
                                     Watch w = watchRef.getAndSet(null);
                                     if (w != null) w.close();
                                     released.countDown();
@@ -184,11 +236,13 @@ public class TarnOperator {
      */
     public void run(KubernetesClient client, String namespace) throws Exception {
         Watch w = startWatch(client, namespace);
+        ready.set(true);
         log.info("TARN operator watching {} namespace(s); press Ctrl+C to stop",
                 namespace == null ? "ALL" : namespace);
         CountDownLatch stopped = new CountDownLatch(1);
         // Block until interrupted — watch is closed separately via JVM shutdown.
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            ready.set(false);
             try { w.close(); } catch (Exception ignored) {}
             stopped.countDown();
         }));

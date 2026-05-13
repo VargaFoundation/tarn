@@ -95,6 +95,31 @@ spec:
               value: {{ .Values.operator.leaderElection.enabled | default true | quote }}
             - name: LEADER_ELECTION_NAMESPACE
               value: {{ .Values.operator.leaderElection.namespace | default .Release.Namespace | quote }}
+            - name: HEALTH_PORT
+              value: {{ .Values.operator.healthPort | default 8080 | quote }}
+          ports:
+            - name: health
+              containerPort: {{ .Values.operator.healthPort | default 8080 }}
+              protocol: TCP
+          # /healthz reports JVM-alive; /readyz reports watch-open. In leader-election mode
+          # standby replicas stay not-ready until they acquire the lease — kubectl picks
+          # the active leader as the Endpoint without extra wiring.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
             {{- toYaml (.Values.operator.resources | default dict) | nindent 12 }}
 {{- end }}
