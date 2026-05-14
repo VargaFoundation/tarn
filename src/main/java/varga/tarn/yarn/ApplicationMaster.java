@@ -89,6 +89,7 @@ public class ApplicationMaster {
     private GlobalRateLimiter globalRateLimiter;
     private java.net.http.HttpClient tritonHttpClient;
     private varga.tarn.yarn.auth.JwtValidator jwtValidator;
+    private varga.tarn.yarn.openai.ConversationAffinity conversationAffinity;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
     private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
@@ -135,6 +136,11 @@ public class ApplicationMaster {
         rangerAuthorizer = new RangerAuthorizer(config);
         quotaEnforcer = new QuotaEnforcer();
         globalRateLimiter = new GlobalRateLimiter(config.globalRateLimitRps);
+        if (config.stickyRoutingEnabled) {
+            this.conversationAffinity = new varga.tarn.yarn.openai.ConversationAffinity(
+                    config.stickyRoutingTtlMs);
+            log.info("Sticky routing enabled (TTL={}ms)", config.stickyRoutingTtlMs);
+        }
         if (config.oauthIssuer != null && !config.oauthIssuer.isEmpty()) {
             try {
                 this.jwtValidator = new varga.tarn.yarn.auth.JwtValidator(config);
@@ -471,6 +477,11 @@ public class ApplicationMaster {
             metricsCollector.purgeMissingModels(liveModels);
         } catch (Exception e) {
             log.warn("Model purge skipped: {}", e.getMessage());
+        }
+
+        // Drop expired sticky-routing entries so the map doesn't grow unbounded across days.
+        if (conversationAffinity != null) {
+            conversationAffinity.purgeExpired();
         }
     }
 
@@ -974,6 +985,9 @@ public class ApplicationMaster {
                 }
                 runningContainers.removeIf(c -> c.getId().equals(status.getContainerId()));
                 readyContainerIds.remove(status.getContainerId());
+                if (conversationAffinity != null) {
+                    conversationAffinity.evictByContainer(status.getContainerId());
+                }
                 unregisterFromZooKeeper(status.getContainerId());
             }
         }
@@ -1164,6 +1178,11 @@ public class ApplicationMaster {
     /** {@code null} when OAuth is not configured — the legacy token flow stays active. */
     public varga.tarn.yarn.auth.JwtValidator getJwtValidator() {
         return jwtValidator;
+    }
+
+    /** {@code null} when sticky routing is disabled. */
+    public varga.tarn.yarn.openai.ConversationAffinity getConversationAffinity() {
+        return conversationAffinity;
     }
 
     /**

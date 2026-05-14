@@ -145,6 +145,13 @@ public class TarnConfig {
      */
     public int globalRateLimitRps;
 
+    /**
+     * When true, the proxy honours an {@code X-Conversation-Id} request header by routing
+     * follow-ups to the container that served the conversation last (KV-cache reuse).
+     */
+    public boolean stickyRoutingEnabled;
+    public long stickyRoutingTtlMs;
+
     public TarnConfig() {
         // Defaults from environment or static defaults
         tritonImage = getEnv("TRITON_IMAGE", "nvcr.io/nvidia/tritonserver:24.09-py3");
@@ -222,6 +229,8 @@ public class TarnConfig {
         scaleCooldownMs = Long.parseLong(getEnv("SCALE_COOLDOWN_MS", "60000"));
         scaleStabilityWindow = Integer.parseInt(getEnv("SCALE_STABILITY_WINDOW", "1"));
         globalRateLimitRps = Integer.parseInt(getEnv("GLOBAL_RATE_LIMIT_RPS", "0"));
+        stickyRoutingEnabled = Boolean.parseBoolean(getEnv("STICKY_ROUTING_ENABLED", "false"));
+        stickyRoutingTtlMs = Long.parseLong(getEnv("STICKY_ROUTING_TTL_MS", "3600000"));
     }
 
     private String getEnv(String key, String defaultValue) {
@@ -274,6 +283,8 @@ public class TarnConfig {
         if (line.hasOption("cooldown")) scaleCooldownMs = Long.parseLong(line.getOptionValue("cooldown"));
         if (line.hasOption("scale-stability-window")) scaleStabilityWindow = Integer.parseInt(line.getOptionValue("scale-stability-window"));
         if (line.hasOption("global-rate-limit-rps")) globalRateLimitRps = Integer.parseInt(line.getOptionValue("global-rate-limit-rps"));
+        if (line.hasOption("sticky-routing-enabled")) stickyRoutingEnabled = true;
+        if (line.hasOption("sticky-routing-ttl-ms")) stickyRoutingTtlMs = Long.parseLong(line.getOptionValue("sticky-routing-ttl-ms"));
         if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
         if (line.hasOption("ranger-strict")) rangerStrict = true;
         if (line.hasOption("zk-required")) zkRequired = true;
@@ -328,6 +339,7 @@ public class TarnConfig {
         if (scaleDownThreshold < 0 || scaleDownThreshold >= scaleUpThreshold) throw new IllegalArgumentException("scaleDownThreshold must be in [0, scaleUpThreshold)");
         if (scaleStabilityWindow < 1) throw new IllegalArgumentException("scaleStabilityWindow must be >= 1");
         if (globalRateLimitRps < 0) throw new IllegalArgumentException("globalRateLimitRps must be >= 0");
+        if (stickyRoutingTtlMs < 1_000L) throw new IllegalArgumentException("stickyRoutingTtlMs must be >= 1000");
         if (tlsEnabled && (tlsKeystorePath == null || tlsKeystorePath.isEmpty())) {
             throw new IllegalArgumentException("--tls-enabled requires --tls-keystore");
         }
@@ -436,6 +448,10 @@ public class TarnConfig {
                 "Consecutive monitor ticks the load must stay past a threshold before scaling (default 1)");
         options.addOption(null, "global-rate-limit-rps", true,
                 "Process-wide cap on inference requests per second on the OpenAI proxy (0 disables, default 0)");
+        options.addOption(null, "sticky-routing-enabled", false,
+                "Honour X-Conversation-Id in the proxy to route follow-ups to the same container (KV-cache reuse)");
+        options.addOption(null, "sticky-routing-ttl-ms", true,
+                "Affinity TTL in ms when sticky routing is on (default 3600000 = 1h)");
         options.addOption("cp", "client-port", true, "Client health endpoint port (default: 8889)");
         return options;
     }

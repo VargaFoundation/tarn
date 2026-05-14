@@ -258,11 +258,33 @@ public class OpenAIProxyHandler implements HttpHandler {
             }
         }
 
-        Container target = pickLeastLoadedReadyContainer();
+        // Sticky routing: when a client sets X-Conversation-Id, send the request to the
+        // container that served the previous turn so the KV cache stays warm. We still fall
+        // back to least-loaded if the cached container is no longer ready or has filled its
+        // queue (>80% capacity is the threshold beyond which forcing affinity is counter-
+        // productive — better to recompute KV than to time out).
+        String conversationId = ex.getRequestHeaders().getFirst("X-Conversation-Id");
+        ConversationAffinity affinity = am.getConversationAffinity();
+        Container target = null;
+        if (affinity != null && conversationId != null && !conversationId.isEmpty()) {
+            org.apache.hadoop.yarn.api.records.ContainerId pinned = affinity.get(conversationId);
+            if (pinned != null && am.isContainerReady(pinned)) {
+                int depth = am.getMetricsCollector().getQueueDepth(pinned.toString());
+                if (depth < (int) (config.queueCapacityPerContainer * 0.8)) {
+                    target = containerById(pinned);
+                }
+            }
+        }
+        if (target == null) {
+            target = pickLeastLoadedReadyContainer();
+        }
         if (target == null) {
             span.setStatus(StatusCode.ERROR, "no_backends");
             writeJsonError(ex, 503, "service_unavailable", "No Triton instances are ready");
             return;
+        }
+        if (affinity != null && conversationId != null && !conversationId.isEmpty()) {
+            affinity.put(conversationId, target.getId());
         }
         span.setAttribute(TarnTracing.ATTR_CONTAINER, target.getId().toString());
 
@@ -498,6 +520,17 @@ public class OpenAIProxyHandler implements HttpHandler {
             if (!e.getValue().isEmpty()) out.put(e.getKey(), e.getValue().get(0));
         }
         return out;
+    }
+
+    /** Linear scan; runningContainers is small (< 100 in practice). */
+    private Container containerById(org.apache.hadoop.yarn.api.records.ContainerId id) {
+        List<Container> containers = am.getRunningContainers();
+        synchronized (containers) {
+            for (Container c : containers) {
+                if (c.getId().equals(id)) return c;
+            }
+        }
+        return null;
     }
 
     /**
