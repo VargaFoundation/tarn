@@ -81,16 +81,23 @@ public class TritonDeploymentReconciler {
 
     private final KubernetesClient client;
     private final TarnEvents events;
+    /** Operator-wide Prometheus URL passed via env; per-CR override may shadow it. */
+    private final String defaultPrometheusUrl;
 
     public TritonDeploymentReconciler(KubernetesClient client) {
-        this.client = client;
-        this.events = new TarnEvents(client);
+        this(client, new TarnEvents(client),
+                System.getenv().getOrDefault("PROMETHEUS_URL", ""));
     }
 
     // Test-only constructor that lets callers stub the event sink.
     TritonDeploymentReconciler(KubernetesClient client, TarnEvents events) {
+        this(client, events, "");
+    }
+
+    TritonDeploymentReconciler(KubernetesClient client, TarnEvents events, String prometheusUrl) {
         this.client = client;
         this.events = events;
+        this.defaultPrometheusUrl = prometheusUrl == null ? "" : prometheusUrl;
     }
 
     /**
@@ -219,6 +226,11 @@ public class TritonDeploymentReconciler {
             log.info("Reconciled {}/{}: phase={} ready={}/{} variants={}",
                     ns, name, status.getPhase(), totalReady, spec.effectiveReplicas(),
                     variants == null ? "single" : variants.size());
+
+            // Canary gate runs after we know replicas are reconciled. It mutates spec.traffic
+            // weights on promotion, which triggers a re-reconcile via the watch in the next
+            // tick — no recursion here.
+            maybeRunCanaryAnalysis(cr, status);
         } catch (Exception e) {
             log.error("Reconcile failed for {}/{}: {}", ns, name, e.getMessage(), e);
             status.setPhase(TritonDeploymentStatus.PHASE_DEGRADED);
@@ -228,6 +240,133 @@ public class TritonDeploymentReconciler {
                     e.getClass().getSimpleName(), e.getMessage());
         }
         return status;
+    }
+
+    /**
+     * Runs the canary analysis MVP gate. Finds the first variant with {@code analysis} set;
+     * once the observation window has elapsed, queries Prometheus for the variant's error
+     * rate and p95 latency ratio, and if both are under the configured thresholds promotes
+     * the canary to 100% by zeroing every other variant. The CR mutation re-enters the
+     * reconciler on the next watch event so traffic actually shifts.
+     */
+    void maybeRunCanaryAnalysis(TritonDeployment cr, TritonDeploymentStatus status) {
+        List<TritonDeploymentSpec.TrafficVariant> variants = cr.getSpec().getTraffic();
+        if (variants == null || variants.size() < 2) return;
+
+        TritonDeploymentSpec.TrafficVariant canary = null;
+        for (TritonDeploymentSpec.TrafficVariant v : variants) {
+            if (v.getAnalysis() != null) { canary = v; break; }
+        }
+        if (canary == null) return;
+
+        TritonDeploymentSpec.CanaryAnalysis cfg = canary.getAnalysis();
+        TritonDeploymentStatus.CanaryAnalysisStatus prev = status.getCanaryAnalysis();
+        if (prev != null
+                && (TritonDeploymentStatus.CanaryAnalysisStatus.SUCCEEDED.equals(prev.getState())
+                        || TritonDeploymentStatus.CanaryAnalysisStatus.FAILED.equals(prev.getState()))) {
+            // Terminal — don't re-run until the operator clears `analysis` from spec.
+            return;
+        }
+
+        // Stamp the run on first observation so observers (kubectl/dashboard) see when the
+        // gate started.
+        if (prev == null || !canary.getName().equals(prev.getVariant())) {
+            status.setCanaryAnalysis(new TritonDeploymentStatus.CanaryAnalysisStatus(
+                    canary.getName(),
+                    TritonDeploymentStatus.CanaryAnalysisStatus.RUNNING,
+                    "observation window started"));
+            return; // wait until at least one window has elapsed before querying Prometheus.
+        }
+
+        long startMs = java.time.Instant.parse(prev.getStartTime()).toEpochMilli();
+        long elapsedSec = (System.currentTimeMillis() - startMs) / 1000L;
+        int windowSec = cfg.getObservationWindowSec() == null ? 300 : cfg.getObservationWindowSec();
+        if (elapsedSec < windowSec) {
+            prev.setLastMessage("observing (" + elapsedSec + "/" + windowSec + "s)");
+            return;
+        }
+
+        String prometheusUrl = cfg.getPrometheusUrl();
+        if (prometheusUrl == null || prometheusUrl.isEmpty()) prometheusUrl = defaultPrometheusUrl;
+        if (prometheusUrl == null || prometheusUrl.isEmpty()) {
+            // No prometheus configured — operator gets a Warning, gate stays in Unknown.
+            prev.setState(TritonDeploymentStatus.CanaryAnalysisStatus.UNKNOWN);
+            prev.setLastMessage("no Prometheus URL configured; cannot evaluate gate");
+            events.warning(cr, "CanaryUnknown",
+                    "Prometheus URL not configured; canary analysis skipped");
+            return;
+        }
+
+        PrometheusQuerier querier = new PrometheusQuerier(prometheusUrl);
+        String ns = cr.getMetadata().getNamespace();
+        String inst = cr.getMetadata().getName();
+        // PromQL targets the ServiceMonitor variant label injected by the operator.
+        String errorRateExpr = "sum(rate(triton_request_failure_count{variant=\"" + canary.getName()
+                + "\",tarn_instance=\"" + inst + "\",namespace=\"" + ns + "\"}["
+                + windowSec + "s])) / sum(rate(triton_request_count{variant=\"" + canary.getName()
+                + "\",tarn_instance=\"" + inst + "\",namespace=\"" + ns + "\"}[" + windowSec + "s]))";
+        String canaryP95Expr = "histogram_quantile(0.95, sum(rate(triton_request_duration_us_bucket{variant=\""
+                + canary.getName() + "\",tarn_instance=\"" + inst + "\",namespace=\""
+                + ns + "\"}[" + windowSec + "s])) by (le))";
+        // Baseline = the dominant non-canary variant.
+        String baselineVariant = pickBaselineVariant(variants, canary);
+        String baseP95Expr = "histogram_quantile(0.95, sum(rate(triton_request_duration_us_bucket{variant=\""
+                + baselineVariant + "\",tarn_instance=\"" + inst + "\",namespace=\""
+                + ns + "\"}[" + windowSec + "s])) by (le))";
+
+        double errRate = querier.instantScalar(errorRateExpr);
+        double canaryP95 = querier.instantScalar(canaryP95Expr);
+        double baseP95 = querier.instantScalar(baseP95Expr);
+
+        boolean errOk = !Double.isNaN(errRate) && errRate < cfg.getErrorRateThreshold();
+        // If we don't have a baseline p95 yet (baseline still warming up), pass the latency
+        // check rather than blocking promotion forever.
+        boolean latencyOk = Double.isNaN(baseP95) || Double.isNaN(canaryP95)
+                || (canaryP95 / baseP95) < cfg.getLatencyP95RatioMax();
+
+        if (errOk && latencyOk) {
+            prev.setState(TritonDeploymentStatus.CanaryAnalysisStatus.SUCCEEDED);
+            prev.setLastMessage("promoted (err=" + errRate + ", p95ratio="
+                    + (Double.isNaN(baseP95) ? "n/a" : (canaryP95 / baseP95)) + ")");
+            promoteCanary(cr, canary.getName());
+            events.normal(cr, "CanaryPromoted",
+                    "Variant %s promoted to 100%% after %ds (err=%.4f, p95ratio=%s)",
+                    canary.getName(), windowSec, errRate,
+                    Double.isNaN(baseP95) ? "n/a" : String.format("%.2f", canaryP95 / baseP95));
+        } else {
+            prev.setState(TritonDeploymentStatus.CanaryAnalysisStatus.FAILED);
+            prev.setLastMessage("rolled back (err=" + errRate + ", canaryP95="
+                    + canaryP95 + ", baseP95=" + baseP95 + ")");
+            events.warning(cr, "CanaryFailed",
+                    "Variant %s failed gate: err=%.4f (threshold %.4f), p95 canary=%.0fus base=%.0fus",
+                    canary.getName(), errRate, cfg.getErrorRateThreshold(), canaryP95, baseP95);
+        }
+    }
+
+    private static String pickBaselineVariant(List<TritonDeploymentSpec.TrafficVariant> variants,
+                                              TritonDeploymentSpec.TrafficVariant canary) {
+        TritonDeploymentSpec.TrafficVariant best = null;
+        for (TritonDeploymentSpec.TrafficVariant v : variants) {
+            if (v == canary) continue;
+            if (best == null || (v.getWeight() != null
+                    && (best.getWeight() == null || v.getWeight() > best.getWeight()))) {
+                best = v;
+            }
+        }
+        return best == null ? "" : best.getName();
+    }
+
+    private void promoteCanary(TritonDeployment cr, String canaryName) {
+        for (TritonDeploymentSpec.TrafficVariant v : cr.getSpec().getTraffic()) {
+            v.setWeight(canaryName.equals(v.getName()) ? 100 : 0);
+        }
+        retryOnConflict(() -> {
+            client.resources(TritonDeployment.class)
+                    .inNamespace(cr.getMetadata().getNamespace())
+                    .resource(cr)
+                    .update();
+            return null;
+        });
     }
 
     /** Deletes a CR's dependent resources. Called when a CR is removed from the cluster. */

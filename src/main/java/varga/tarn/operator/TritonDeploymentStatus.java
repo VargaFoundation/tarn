@@ -45,6 +45,7 @@ public class TritonDeploymentStatus {
     private Integer targetReplicas = 0;
     private Long observedGeneration;
     private List<Condition> conditions = new ArrayList<>();
+    private CanaryAnalysisStatus canaryAnalysis;
 
     public String getPhase() { return phase; }
     public void setPhase(String phase) { this.phase = phase; }
@@ -56,6 +57,39 @@ public class TritonDeploymentStatus {
     public void setObservedGeneration(Long g) { this.observedGeneration = g; }
     public List<Condition> getConditions() { return conditions; }
     public void setConditions(List<Condition> c) { this.conditions = c; }
+    public CanaryAnalysisStatus getCanaryAnalysis() { return canaryAnalysis; }
+    public void setCanaryAnalysis(CanaryAnalysisStatus c) { this.canaryAnalysis = c; }
+
+    /** Records the in-flight canary gate for kubectl/dashboard visibility. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class CanaryAnalysisStatus {
+        public static final String RUNNING = "Running";
+        public static final String SUCCEEDED = "Succeeded";
+        public static final String FAILED = "Failed";
+        public static final String UNKNOWN = "Unknown";
+
+        private String state = RUNNING;
+        private String variant;
+        private String startTime;
+        private String lastMessage;
+
+        public CanaryAnalysisStatus() {}
+        public CanaryAnalysisStatus(String variant, String state, String message) {
+            this.variant = variant;
+            this.state = state;
+            this.lastMessage = message;
+            this.startTime = Instant.now().toString();
+        }
+
+        public String getState() { return state; }
+        public void setState(String s) { this.state = s; }
+        public String getVariant() { return variant; }
+        public void setVariant(String v) { this.variant = v; }
+        public String getStartTime() { return startTime; }
+        public void setStartTime(String t) { this.startTime = t; }
+        public String getLastMessage() { return lastMessage; }
+        public void setLastMessage(String m) { this.lastMessage = m; }
+    }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class Condition {

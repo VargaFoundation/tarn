@@ -272,6 +272,12 @@ public class TritonDeploymentSpec {
         private Integer weight;
         private String modelRepository;
         private String image;
+        /**
+         * When non-null, the reconciler treats this variant as a canary and runs an analysis
+         * gate: after {@code observationWindowSec} the SLO metrics are checked, and on
+         * success the variant is promoted to 100% (the other variants are zeroed out).
+         */
+        private CanaryAnalysis analysis;
         public TrafficVariant() {}
         public TrafficVariant(String name, int weight) { this.name = name; this.weight = weight; }
         public String getName() { return name; }
@@ -282,6 +288,25 @@ public class TritonDeploymentSpec {
         public void setModelRepository(String m) { this.modelRepository = m; }
         public String getImage() { return image; }
         public void setImage(String i) { this.image = i; }
+        public CanaryAnalysis getAnalysis() { return analysis; }
+        public void setAnalysis(CanaryAnalysis a) { this.analysis = a; }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class CanaryAnalysis {
+        private Double errorRateThreshold = 0.01;     // < 1% errors during the window.
+        private Double latencyP95RatioMax = 1.5;       // p95 must stay within 1.5x of stable.
+        private Integer observationWindowSec = 300;    // 5 minute soak by default.
+        private String prometheusUrl;                  // Per-CR override; falls back to operator config.
+
+        public Double getErrorRateThreshold() { return errorRateThreshold; }
+        public void setErrorRateThreshold(Double d) { this.errorRateThreshold = d; }
+        public Double getLatencyP95RatioMax() { return latencyP95RatioMax; }
+        public void setLatencyP95RatioMax(Double d) { this.latencyP95RatioMax = d; }
+        public Integer getObservationWindowSec() { return observationWindowSec; }
+        public void setObservationWindowSec(Integer s) { this.observationWindowSec = s; }
+        public String getPrometheusUrl() { return prometheusUrl; }
+        public void setPrometheusUrl(String u) { this.prometheusUrl = u; }
     }
 
     // Unused but kept to satisfy compilers that want Map<String,String> coercion in tests.

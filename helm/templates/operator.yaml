@@ -97,6 +97,10 @@ spec:
               value: {{ .Values.operator.leaderElection.namespace | default .Release.Namespace | quote }}
             - name: HEALTH_PORT
               value: {{ .Values.operator.healthPort | default 8080 | quote }}
+            {{- if .Values.operator.prometheusUrl }}
+            - name: PROMETHEUS_URL
+              value: {{ .Values.operator.prometheusUrl | quote }}
+            {{- end }}
           ports:
             - name: health
               containerPort: {{ .Values.operator.healthPort | default 8080 }}

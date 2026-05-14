@@ -205,12 +205,48 @@ spec:
                       image:
                         type: string
                         description: Override spec.image for this variant.
+                      analysis:
+                        type: object
+                        description: |
+                          Marks this variant as a canary. After observationWindowSec the
+                          operator queries Prometheus; if the variant's error rate is below
+                          errorRateThreshold and its p95 stays within latencyP95RatioMax of
+                          the dominant variant, it is automatically promoted to 100%.
+                        properties:
+                          errorRateThreshold:
+                            type: number
+                            minimum: 0
+                            maximum: 1
+                            default: 0.01
+                          latencyP95RatioMax:
+                            type: number
+                            minimum: 1
+                            default: 1.5
+                          observationWindowSec:
+                            type: integer
+                            minimum: 60
+                            default: 300
+                          prometheusUrl:
+                            type: string
+                            description: Override the operator-wide PROMETHEUS_URL for this CR.
             status:
               type: object
               properties:
                 phase:
                   type: string
-                  enum: [Pending, Reconciling, Ready, Degraded, Failed]
+                  enum: [Pending, Reconciling, Ready, Degraded, Failed, Terminating]
+                canaryAnalysis:
+                  type: object
+                  properties:
+                    state:
+                      type: string
+                      enum: [Running, Succeeded, Failed, Unknown]
+                    variant:
+                      type: string
+                    startTime:
+                      type: string
+                    lastMessage:
+                      type: string
                 readyReplicas:
                   type: integer
                 targetReplicas:

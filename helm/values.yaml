@@ -159,6 +159,10 @@ operator:
     namespace: ""
   # Port exposing /healthz (liveness) and /readyz (watch active / leader elected).
   healthPort: 8080
+  # Prometheus base URL used by the canary auto-promotion gate. Leave empty to disable
+  # auto-promotion; the operator emits a Warning event when a CR sets analysis but no
+  # Prometheus URL is available.
+  prometheusUrl: ""
   resources:
     limits:
       memory: "512Mi"
