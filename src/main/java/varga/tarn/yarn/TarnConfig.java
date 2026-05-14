@@ -84,6 +84,17 @@ public class TarnConfig {
     public String tritonScheme() {
         return tritonTlsEnabled ? "https" : "http";
     }
+
+    /**
+     * OIDC / JWT authentication. When {@link #oauthIssuer} is non-empty, requests must
+     * carry {@code Authorization: Bearer <jwt>}; the JWT is validated against the JWKS
+     * fetched from {@link #oauthJwksUrl} (refreshed every 24h) and the {@code iss}/{@code aud}
+     * claims must match. When unset, the legacy {@code X-TARN-Token} flow remains active.
+     */
+    public String oauthIssuer;
+    public String oauthAudience;
+    public String oauthJwksUrl;
+    public String oauthGroupsClaim;
     // OpenAI proxy configuration — zero impact when unset.
     public boolean openaiProxyEnabled;
     public int openaiProxyPort;
@@ -181,6 +192,13 @@ public class TarnConfig {
         tritonTlsClientKeystorePasswordAlias = getEnv("TRITON_TLS_CLIENT_KEYSTORE_PASSWORD_ALIAS",
                 "tarn.triton.client.keystore.password");
         tritonTlsClientKeystoreType = getEnv("TRITON_TLS_CLIENT_KEYSTORE_TYPE", "JKS");
+
+        oauthIssuer = getEnv("OAUTH_ISSUER", null);
+        oauthAudience = getEnv("OAUTH_AUDIENCE", null);
+        oauthJwksUrl = getEnv("OAUTH_JWKS_URL", null);
+        // realm_access.roles is the Keycloak default; Okta uses "groups", Auth0 uses
+        // "https://app.example/groups". Operators override via env / CLI.
+        oauthGroupsClaim = getEnv("OAUTH_GROUPS_CLAIM", "realm_access.roles");
         openaiProxyEnabled = Boolean.parseBoolean(getEnv("OPENAI_PROXY_ENABLED", "false"));
         openaiProxyPort = Integer.parseInt(getEnv("OPENAI_PROXY_PORT", "9000"));
         otelEndpoint = getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", null);
@@ -273,6 +291,10 @@ public class TarnConfig {
         if (line.hasOption("triton-tls-client-keystore")) tritonTlsClientKeystorePath = line.getOptionValue("triton-tls-client-keystore");
         if (line.hasOption("triton-tls-client-keystore-type")) tritonTlsClientKeystoreType = line.getOptionValue("triton-tls-client-keystore-type");
         if (line.hasOption("triton-tls-client-keystore-password-alias")) tritonTlsClientKeystorePasswordAlias = line.getOptionValue("triton-tls-client-keystore-password-alias");
+        if (line.hasOption("oauth-issuer")) oauthIssuer = line.getOptionValue("oauth-issuer");
+        if (line.hasOption("oauth-audience")) oauthAudience = line.getOptionValue("oauth-audience");
+        if (line.hasOption("oauth-jwks-url")) oauthJwksUrl = line.getOptionValue("oauth-jwks-url");
+        if (line.hasOption("oauth-groups-claim")) oauthGroupsClaim = line.getOptionValue("oauth-groups-claim");
         if (line.hasOption("openai-proxy-enabled")) openaiProxyEnabled = true;
         if (line.hasOption("openai-proxy-port")) openaiProxyPort = Integer.parseInt(line.getOptionValue("openai-proxy-port"));
         if (line.hasOption("otel-endpoint")) otelEndpoint = line.getOptionValue("otel-endpoint");
@@ -311,6 +333,14 @@ public class TarnConfig {
         }
         if (tritonTlsEnabled && (tritonTlsTruststorePath == null || tritonTlsTruststorePath.isEmpty())) {
             throw new IllegalArgumentException("--triton-tls-enabled requires --triton-tls-truststore");
+        }
+        if (oauthIssuer != null && !oauthIssuer.isEmpty()) {
+            if (oauthAudience == null || oauthAudience.isEmpty()) {
+                throw new IllegalArgumentException("--oauth-issuer requires --oauth-audience");
+            }
+            if (oauthJwksUrl == null || oauthJwksUrl.isEmpty()) {
+                throw new IllegalArgumentException("--oauth-issuer requires --oauth-jwks-url");
+            }
         }
         if (openaiProxyEnabled && (openaiProxyPort <= 0 || openaiProxyPort > 65535)) {
             throw new IllegalArgumentException("openaiProxyPort out of range");
@@ -375,6 +405,10 @@ public class TarnConfig {
         options.addOption(null, "triton-tls-client-keystore", true, "Optional client keystore for mTLS to Triton");
         options.addOption(null, "triton-tls-client-keystore-type", true, "Client keystore type (default JKS)");
         options.addOption(null, "triton-tls-client-keystore-password-alias", true, "JCEKS alias for the client keystore password (default tarn.triton.client.keystore.password)");
+        options.addOption(null, "oauth-issuer", true, "OIDC issuer URL. Setting this enables JWT auth (Authorization: Bearer ...)");
+        options.addOption(null, "oauth-audience", true, "Expected aud claim. Required when --oauth-issuer is set.");
+        options.addOption(null, "oauth-jwks-url", true, "JWKS URL. Required when --oauth-issuer is set.");
+        options.addOption(null, "oauth-groups-claim", true, "JSON path to the claim listing user groups (default realm_access.roles).");
         options.addOption(null, "openai-proxy-enabled", false, "Enable OpenAI-compatible /v1 proxy endpoints (requires a Triton openai_frontend container)");
         options.addOption(null, "openai-proxy-port", true, "Port for the OpenAI proxy (default 9000)");
         options.addOption(null, "otel-endpoint", true, "OTLP gRPC endpoint for trace export (e.g. http://collector:4317)");

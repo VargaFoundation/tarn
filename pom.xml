@@ -267,6 +267,17 @@
 			<version>5.5.0</version>
 			<scope>test</scope>
 		</dependency>
+		<!--
+			Nimbus JOSE+JWT for OIDC/JWT validation. Pinned at the last 9.x for predictable
+			behaviour with the JCE policy bundled in the eclipse-temurin:17-jre-jammy image
+			used by both Dockerfiles. Shaded into the main JAR — Ranger ships its own
+			incompatible Jose4j on the classpath in some Hadoop distributions.
+		-->
+		<dependency>
+			<groupId>com.nimbusds</groupId>
+			<artifactId>nimbus-jose-jwt</artifactId>
+			<version>9.40</version>
+		</dependency>
 	</dependencies>
 
 	<build>

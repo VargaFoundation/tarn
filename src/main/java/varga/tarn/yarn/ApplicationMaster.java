@@ -88,6 +88,7 @@ public class ApplicationMaster {
     private QuotaEnforcer quotaEnforcer;
     private GlobalRateLimiter globalRateLimiter;
     private java.net.http.HttpClient tritonHttpClient;
+    private varga.tarn.yarn.auth.JwtValidator jwtValidator;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
     private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
@@ -134,6 +135,16 @@ public class ApplicationMaster {
         rangerAuthorizer = new RangerAuthorizer(config);
         quotaEnforcer = new QuotaEnforcer();
         globalRateLimiter = new GlobalRateLimiter(config.globalRateLimitRps);
+        if (config.oauthIssuer != null && !config.oauthIssuer.isEmpty()) {
+            try {
+                this.jwtValidator = new varga.tarn.yarn.auth.JwtValidator(config);
+                log.info("JWT authentication enabled (issuer={}, audience={}, jwks={})",
+                        config.oauthIssuer, config.oauthAudience, config.oauthJwksUrl);
+            } catch (Exception e) {
+                throw new IllegalStateException(
+                        "OAuth requested but JwtValidator initialization failed: " + e.getMessage(), e);
+            }
+        }
         if (globalRateLimiter.isEnabled()) {
             log.info("Global rate limit enabled: {} req/s on the OpenAI proxy",
                     globalRateLimiter.getRequestsPerSecond());
@@ -1148,6 +1159,11 @@ public class ApplicationMaster {
     /** Exposed so the OpenAI proxy can share the same TLS-configured client. */
     public java.net.http.HttpClient getTritonHttpClient() {
         return tritonHttpClient;
+    }
+
+    /** {@code null} when OAuth is not configured — the legacy token flow stays active. */
+    public varga.tarn.yarn.auth.JwtValidator getJwtValidator() {
+        return jwtValidator;
     }
 
     /**

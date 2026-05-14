@@ -99,6 +99,9 @@ public class OpenAIProxyHandler implements HttpHandler {
     public void handle(HttpExchange ex) {
         String path = ex.getRequestURI().getPath();
         try {
+            // When OAuth is configured, gate every endpoint behind a valid Bearer JWT.
+            // The legacy static-token flow continues to work when oauthIssuer is unset.
+            if (!authenticate(ex)) return;
             if (path.endsWith("/models") || path.endsWith("/v1/models")) {
                 handleListModels(ex);
                 return;
@@ -125,7 +128,7 @@ public class OpenAIProxyHandler implements HttpHandler {
 
     private void handleListModels(HttpExchange ex) throws IOException {
         String user = getUser(ex);
-        Set<String> groups = getGroups(user);
+        Set<String> groups = getGroups(ex, user);
         String clientIp = resolveClientIp(ex);
         RangerAuthorizer ra = am.getRangerAuthorizer();
 
@@ -193,7 +196,7 @@ public class OpenAIProxyHandler implements HttpHandler {
         }
 
         String user = getUser(ex);
-        Set<String> groups = getGroups(user);
+        Set<String> groups = getGroups(ex, user);
         span.setAttribute(TarnTracing.ATTR_USER, user);
         span.setAttribute(TarnTracing.ATTR_MODEL, baseModel);
         if (lora != null) span.setAttribute(TarnTracing.ATTR_LORA, lora);
@@ -532,8 +535,53 @@ public class OpenAIProxyHandler implements HttpHandler {
         }
     }
 
+    /**
+     * Enforces auth when OAuth is configured: rejects 401 unless a valid Bearer JWT is
+     * presented. With OAuth disabled, returns true so the legacy token / X-User flow keeps
+     * working without code duplication at every endpoint.
+     */
+    private boolean authenticate(HttpExchange ex) throws IOException {
+        varga.tarn.yarn.auth.JwtValidator v = am == null ? null : am.getJwtValidator();
+        if (v == null) return true; // OAuth not configured.
+        String auth = ex.getRequestHeaders().getFirst("Authorization");
+        if (auth == null || !auth.startsWith("Bearer ")) {
+            ex.getResponseHeaders().set("WWW-Authenticate", "Bearer realm=\"tarn\"");
+            writeJsonError(ex, 401, "unauthorized", "Missing Bearer token");
+            return false;
+        }
+        try {
+            v.validate(auth.substring("Bearer ".length()).trim());
+            return true;
+        } catch (Exception e) {
+            ex.getResponseHeaders().set("WWW-Authenticate",
+                    "Bearer realm=\"tarn\", error=\"invalid_token\"");
+            writeJsonError(ex, 401, "unauthorized", "Invalid Bearer token: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Resolves the authenticated user. When JWT auth is enabled and a valid Bearer token
+     * is presented, identity comes from the {@code sub} claim and X-* headers are ignored
+     * (clients can no longer impersonate). Without JWT we fall back to the historical
+     * {@code X-Forwarded-User} / {@code X-TARN-User} / UGI chain.
+     */
     private String getUser(HttpExchange ex) {
-        // Priority: X-Forwarded-User (from Knox) -> X-TARN-User (direct) -> UGI short name.
+        varga.tarn.yarn.auth.JwtValidator v = am == null ? null : am.getJwtValidator();
+        if (v != null) {
+            String auth = ex.getRequestHeaders().getFirst("Authorization");
+            if (auth != null && auth.startsWith("Bearer ")) {
+                try {
+                    com.nimbusds.jwt.JWTClaimsSet claims = v.validate(auth.substring("Bearer ".length()).trim());
+                    return varga.tarn.yarn.auth.JwtValidator.userOf(claims);
+                } catch (Exception e) {
+                    // Bad / expired JWT — fall through to the legacy path so the request still
+                    // gets a 401 from isAuthorized() upstream. The caller will see "anonymous"
+                    // until that gate is updated to reject directly.
+                    log.debug("JWT validation failed: {}", e.getMessage());
+                }
+            }
+        }
         String user = ex.getRequestHeaders().getFirst("X-Forwarded-User");
         if (user == null) user = ex.getRequestHeaders().getFirst("X-TARN-User");
         if (user == null || user.isEmpty()) {
@@ -544,6 +592,23 @@ public class OpenAIProxyHandler implements HttpHandler {
             }
         }
         return user;
+    }
+
+    private Set<String> getGroups(HttpExchange ex, String user) {
+        varga.tarn.yarn.auth.JwtValidator v = am == null ? null : am.getJwtValidator();
+        if (v != null) {
+            String auth = ex.getRequestHeaders().getFirst("Authorization");
+            if (auth != null && auth.startsWith("Bearer ")) {
+                try {
+                    com.nimbusds.jwt.JWTClaimsSet claims = v.validate(auth.substring("Bearer ".length()).trim());
+                    Set<String> claimGroups = v.groupsOf(claims);
+                    if (!claimGroups.isEmpty()) return claimGroups;
+                } catch (Exception ignored) {
+                    // Fall through to UGI; the auth gate will reject upstream.
+                }
+            }
+        }
+        return getGroups(user);
     }
 
     private Set<String> getGroups(String user) {
