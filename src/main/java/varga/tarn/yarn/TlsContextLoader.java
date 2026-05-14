@@ -28,8 +28,11 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.KeyManager;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLParameters;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import java.io.InputStream;
 import java.security.KeyStore;
 
@@ -89,6 +92,64 @@ public final class TlsContextLoader {
     private static KeyStore loadKeystore(TarnConfig cfg, Configuration hadoopConf, char[] password) throws Exception {
         KeyStore ks = KeyStore.getInstance(cfg.tlsKeystoreType != null ? cfg.tlsKeystoreType : "JKS");
         Path p = new Path(cfg.tlsKeystorePath);
+        FileSystem fs = p.getFileSystem(hadoopConf);
+        try (FSDataInputStream in = fs.open(p); InputStream is = in) {
+            ks.load(is, password);
+        }
+        return ks;
+    }
+
+    /**
+     * Builds an {@link SSLContext} for outbound TLS to Triton (south-side mTLS).
+     * <p>
+     * The truststore is required (validates the Triton server certificate); a client
+     * keystore is optional (mTLS — Triton verifies us back). Both stores are loaded the
+     * same way as the server-side keystore: from HDFS or local FS, password from a
+     * JCEKS-backed Hadoop credential provider.
+     */
+    public static SSLContext buildClientSslContext(TarnConfig cfg, Configuration hadoopConf) throws Exception {
+        if (cfg.tritonTlsTruststorePath == null || cfg.tritonTlsTruststorePath.isEmpty()) {
+            throw new IllegalStateException("Triton TLS enabled but truststore path is missing");
+        }
+        KeyStore trust = loadStore(cfg.tritonTlsTruststorePath, cfg.tritonTlsTruststoreType,
+                cfg.tritonTlsTruststorePasswordAlias, hadoopConf);
+        TrustManagerFactory tmf = TrustManagerFactory.getInstance(
+                TrustManagerFactory.getDefaultAlgorithm());
+        tmf.init(trust);
+        TrustManager[] tms = tmf.getTrustManagers();
+
+        KeyManager[] kms = null;
+        if (cfg.tritonTlsClientKeystorePath != null && !cfg.tritonTlsClientKeystorePath.isEmpty()) {
+            char[] pwd = hadoopConf.getPassword(cfg.tritonTlsClientKeystorePasswordAlias);
+            if (pwd == null) {
+                throw new IllegalStateException(
+                        "No password found for client keystore alias " + cfg.tritonTlsClientKeystorePasswordAlias);
+            }
+            KeyStore client = loadStoreWithPassword(cfg.tritonTlsClientKeystorePath,
+                    cfg.tritonTlsClientKeystoreType, pwd, hadoopConf);
+            KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            kmf.init(client, pwd);
+            kms = kmf.getKeyManagers();
+        }
+
+        SSLContext ctx = SSLContext.getInstance("TLSv1.2");
+        ctx.init(kms, tms, null);
+        return ctx;
+    }
+
+    private static KeyStore loadStore(String path, String type, String passwordAlias,
+                                      Configuration hadoopConf) throws Exception {
+        char[] pwd = hadoopConf.getPassword(passwordAlias);
+        if (pwd == null) {
+            throw new IllegalStateException("No password found for alias " + passwordAlias);
+        }
+        return loadStoreWithPassword(path, type, pwd, hadoopConf);
+    }
+
+    private static KeyStore loadStoreWithPassword(String path, String type, char[] password,
+                                                  Configuration hadoopConf) throws Exception {
+        KeyStore ks = KeyStore.getInstance(type != null ? type : "JKS");
+        Path p = new Path(path);
         FileSystem fs = p.getFileSystem(hadoopConf);
         try (FSDataInputStream in = fs.open(p); InputStream is = in) {
             ks.load(is, password);

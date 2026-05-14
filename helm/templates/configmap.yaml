@@ -16,6 +16,14 @@ data:
   {{- if .Values.config.tlsKeystorePath }}
   TLS_KEYSTORE_PATH: {{ .Values.config.tlsKeystorePath | quote }}
   {{- end }}
+  # South-side TLS (AM/proxy → Triton)
+  TRITON_TLS_ENABLED: {{ .Values.config.tritonTlsEnabled | default false | quote }}
+  {{- if .Values.config.tritonTlsTruststorePath }}
+  TRITON_TLS_TRUSTSTORE_PATH: {{ .Values.config.tritonTlsTruststorePath | quote }}
+  {{- end }}
+  {{- if .Values.config.tritonTlsClientKeystorePath }}
+  TRITON_TLS_CLIENT_KEYSTORE_PATH: {{ .Values.config.tritonTlsClientKeystorePath | quote }}
+  {{- end }}
   # OpenAI proxy
   OPENAI_PROXY_ENABLED: {{ .Values.config.openaiProxyEnabled | quote }}
   # OTEL

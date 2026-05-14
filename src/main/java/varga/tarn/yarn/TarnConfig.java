@@ -65,6 +65,25 @@ public class TarnConfig {
     public String tlsKeystorePath;
     public String tlsKeystorePasswordAlias;
     public String tlsKeystoreType;
+
+    /**
+     * South-side mTLS (AM/proxy → Triton). When enabled, all outbound HTTP calls to Triton
+     * use https:// with a configurable truststore (for server cert validation) and an
+     * optional client keystore (for mutual TLS). Defaults to disabled to keep parity with
+     * clusters running plain-HTTP Triton.
+     */
+    public boolean tritonTlsEnabled;
+    public String tritonTlsTruststorePath;
+    public String tritonTlsTruststorePasswordAlias;
+    public String tritonTlsTruststoreType;
+    public String tritonTlsClientKeystorePath;
+    public String tritonTlsClientKeystorePasswordAlias;
+    public String tritonTlsClientKeystoreType;
+
+    /** {@code "https"} when {@link #tritonTlsEnabled} is set, {@code "http"} otherwise. */
+    public String tritonScheme() {
+        return tritonTlsEnabled ? "https" : "http";
+    }
     // OpenAI proxy configuration — zero impact when unset.
     public boolean openaiProxyEnabled;
     public int openaiProxyPort;
@@ -152,6 +171,16 @@ public class TarnConfig {
         tlsKeystorePath = getEnv("TLS_KEYSTORE_PATH", null);
         tlsKeystorePasswordAlias = getEnv("TLS_KEYSTORE_PASSWORD_ALIAS", "tarn.tls.keystore.password");
         tlsKeystoreType = getEnv("TLS_KEYSTORE_TYPE", "JKS");
+
+        tritonTlsEnabled = Boolean.parseBoolean(getEnv("TRITON_TLS_ENABLED", "false"));
+        tritonTlsTruststorePath = getEnv("TRITON_TLS_TRUSTSTORE_PATH", null);
+        tritonTlsTruststorePasswordAlias = getEnv("TRITON_TLS_TRUSTSTORE_PASSWORD_ALIAS",
+                "tarn.triton.truststore.password");
+        tritonTlsTruststoreType = getEnv("TRITON_TLS_TRUSTSTORE_TYPE", "JKS");
+        tritonTlsClientKeystorePath = getEnv("TRITON_TLS_CLIENT_KEYSTORE_PATH", null);
+        tritonTlsClientKeystorePasswordAlias = getEnv("TRITON_TLS_CLIENT_KEYSTORE_PASSWORD_ALIAS",
+                "tarn.triton.client.keystore.password");
+        tritonTlsClientKeystoreType = getEnv("TRITON_TLS_CLIENT_KEYSTORE_TYPE", "JKS");
         openaiProxyEnabled = Boolean.parseBoolean(getEnv("OPENAI_PROXY_ENABLED", "false"));
         openaiProxyPort = Integer.parseInt(getEnv("OPENAI_PROXY_PORT", "9000"));
         otelEndpoint = getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", null);
@@ -237,6 +266,13 @@ public class TarnConfig {
         if (line.hasOption("tls-keystore")) tlsKeystorePath = line.getOptionValue("tls-keystore");
         if (line.hasOption("tls-keystore-type")) tlsKeystoreType = line.getOptionValue("tls-keystore-type");
         if (line.hasOption("tls-keystore-password-alias")) tlsKeystorePasswordAlias = line.getOptionValue("tls-keystore-password-alias");
+        if (line.hasOption("triton-tls-enabled")) tritonTlsEnabled = true;
+        if (line.hasOption("triton-tls-truststore")) tritonTlsTruststorePath = line.getOptionValue("triton-tls-truststore");
+        if (line.hasOption("triton-tls-truststore-type")) tritonTlsTruststoreType = line.getOptionValue("triton-tls-truststore-type");
+        if (line.hasOption("triton-tls-truststore-password-alias")) tritonTlsTruststorePasswordAlias = line.getOptionValue("triton-tls-truststore-password-alias");
+        if (line.hasOption("triton-tls-client-keystore")) tritonTlsClientKeystorePath = line.getOptionValue("triton-tls-client-keystore");
+        if (line.hasOption("triton-tls-client-keystore-type")) tritonTlsClientKeystoreType = line.getOptionValue("triton-tls-client-keystore-type");
+        if (line.hasOption("triton-tls-client-keystore-password-alias")) tritonTlsClientKeystorePasswordAlias = line.getOptionValue("triton-tls-client-keystore-password-alias");
         if (line.hasOption("openai-proxy-enabled")) openaiProxyEnabled = true;
         if (line.hasOption("openai-proxy-port")) openaiProxyPort = Integer.parseInt(line.getOptionValue("openai-proxy-port"));
         if (line.hasOption("otel-endpoint")) otelEndpoint = line.getOptionValue("otel-endpoint");
@@ -272,6 +308,9 @@ public class TarnConfig {
         if (globalRateLimitRps < 0) throw new IllegalArgumentException("globalRateLimitRps must be >= 0");
         if (tlsEnabled && (tlsKeystorePath == null || tlsKeystorePath.isEmpty())) {
             throw new IllegalArgumentException("--tls-enabled requires --tls-keystore");
+        }
+        if (tritonTlsEnabled && (tritonTlsTruststorePath == null || tritonTlsTruststorePath.isEmpty())) {
+            throw new IllegalArgumentException("--triton-tls-enabled requires --triton-tls-truststore");
         }
         if (openaiProxyEnabled && (openaiProxyPort <= 0 || openaiProxyPort > 65535)) {
             throw new IllegalArgumentException("openaiProxyPort out of range");
@@ -329,6 +368,13 @@ public class TarnConfig {
         options.addOption(null, "tls-keystore", true, "HDFS path or local path to the TLS keystore (JKS/PKCS12)");
         options.addOption(null, "tls-keystore-type", true, "Keystore type (JKS or PKCS12, default JKS)");
         options.addOption(null, "tls-keystore-password-alias", true, "JCEKS alias holding the keystore password (default tarn.tls.keystore.password)");
+        options.addOption(null, "triton-tls-enabled", false, "Use HTTPS for all outbound calls to Triton (requires --triton-tls-truststore)");
+        options.addOption(null, "triton-tls-truststore", true, "HDFS or local path to the truststore that signs Triton's server cert");
+        options.addOption(null, "triton-tls-truststore-type", true, "Truststore type (JKS or PKCS12, default JKS)");
+        options.addOption(null, "triton-tls-truststore-password-alias", true, "JCEKS alias for the truststore password (default tarn.triton.truststore.password)");
+        options.addOption(null, "triton-tls-client-keystore", true, "Optional client keystore for mTLS to Triton");
+        options.addOption(null, "triton-tls-client-keystore-type", true, "Client keystore type (default JKS)");
+        options.addOption(null, "triton-tls-client-keystore-password-alias", true, "JCEKS alias for the client keystore password (default tarn.triton.client.keystore.password)");
         options.addOption(null, "openai-proxy-enabled", false, "Enable OpenAI-compatible /v1 proxy endpoints (requires a Triton openai_frontend container)");
         options.addOption(null, "openai-proxy-port", true, "Port for the OpenAI proxy (default 9000)");
         options.addOption(null, "otel-endpoint", true, "OTLP gRPC endpoint for trace export (e.g. http://collector:4317)");

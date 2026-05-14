@@ -54,6 +54,9 @@ public class MetricsCollector {
 
     private final HttpClient httpClient;
     private final int metricsPort;
+    // Scheme used for outbound calls to Triton. "http" by default; "https" when the AM is
+    // configured with --triton-tls-enabled. Injected by the AM via the dedicated constructor.
+    private volatile String scheme = "http";
     // Cached host resolution — refused hosts stay refused across fetches.
     private final Map<String, Boolean> hostAllowCache = new ConcurrentHashMap<>();
 
@@ -85,6 +88,17 @@ public class MetricsCollector {
     public MetricsCollector(int metricsPort, HttpClient httpClient) {
         this.metricsPort = metricsPort;
         this.httpClient = httpClient;
+    }
+
+    /** Switches outbound URL construction to {@code https://} when south-side TLS is on. */
+    public void setScheme(String scheme) {
+        if (scheme != null && (scheme.equals("http") || scheme.equals("https"))) {
+            this.scheme = scheme;
+        }
+    }
+
+    public String getScheme() {
+        return scheme;
     }
 
     // Container startup tracking
@@ -378,7 +392,7 @@ public class MetricsCollector {
         if (!isHostAllowed(host)) return false;
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://" + host + ":" + tritonPort + "/v2/health/ready"))
+                    .uri(URI.create(scheme + "://" + host + ":" + tritonPort + "/v2/health/ready"))
                     .timeout(Duration.ofSeconds(2))
                     .build();
             HttpResponse<Void> response = httpClient.send(request, HttpResponse.BodyHandlers.discarding());
@@ -397,7 +411,7 @@ public class MetricsCollector {
         if (!isHostAllowed(host)) return "";
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://" + host + ":" + metricsPort + "/metrics"))
+                    .uri(URI.create(scheme + "://" + host + ":" + metricsPort + "/metrics"))
                     .timeout(Duration.ofSeconds(3))
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
@@ -414,7 +428,7 @@ public class MetricsCollector {
         if (!isHostAllowed(host)) return "[]";
         try {
             HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create("http://" + host + ":" + tritonPort + "/v2/repository/index"))
+                    .uri(URI.create(scheme + "://" + host + ":" + tritonPort + "/v2/repository/index"))
                     .POST(HttpRequest.BodyPublishers.noBody()) // Triton index is often a POST
                     .timeout(Duration.ofSeconds(3))
                     .build();

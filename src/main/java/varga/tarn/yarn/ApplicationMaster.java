@@ -87,6 +87,7 @@ public class ApplicationMaster {
     private RangerAuthorizer rangerAuthorizer;
     private QuotaEnforcer quotaEnforcer;
     private GlobalRateLimiter globalRateLimiter;
+    private java.net.http.HttpClient tritonHttpClient;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
     private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
@@ -104,7 +105,9 @@ public class ApplicationMaster {
 
     public void init(String[] args) throws Exception {
         config.parseArgs(args);
-        this.metricsCollector = new MetricsCollector(config.metricsPort);
+        this.tritonHttpClient = buildTritonHttpClient();
+        this.metricsCollector = new MetricsCollector(config.metricsPort, tritonHttpClient);
+        this.metricsCollector.setScheme(config.tritonScheme());
         this.scalingPolicy = new ScalingPolicy(
                 config.scaleUpThreshold,
                 config.scaleDownThreshold,
@@ -1122,6 +1125,29 @@ public class ApplicationMaster {
 
     public GlobalRateLimiter getGlobalRateLimiter() {
         return globalRateLimiter;
+    }
+
+    /**
+     * Builds the outbound HttpClient used to talk to Triton. When south-side TLS is enabled,
+     * the client validates the Triton server cert against the configured truststore (and
+     * presents a client cert if mTLS is on). Otherwise we get a plain HttpClient.
+     */
+    private java.net.http.HttpClient buildTritonHttpClient() throws Exception {
+        java.net.http.HttpClient.Builder b = java.net.http.HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(5));
+        if (config.tritonTlsEnabled) {
+            javax.net.ssl.SSLContext ctx = TlsContextLoader.buildClientSslContext(config, conf);
+            b.sslContext(ctx);
+            log.info("South-side TLS to Triton enabled (truststore={}, clientKeystore={})",
+                    config.tritonTlsTruststorePath,
+                    config.tritonTlsClientKeystorePath != null ? config.tritonTlsClientKeystorePath : "<none>");
+        }
+        return b.build();
+    }
+
+    /** Exposed so the OpenAI proxy can share the same TLS-configured client. */
+    public java.net.http.HttpClient getTritonHttpClient() {
+        return tritonHttpClient;
     }
 
     /**

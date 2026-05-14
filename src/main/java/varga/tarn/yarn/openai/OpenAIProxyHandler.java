@@ -85,7 +85,11 @@ public class OpenAIProxyHandler implements HttpHandler {
     public OpenAIProxyHandler(ApplicationMaster am, TarnConfig config) {
         this.am = am;
         this.config = config;
-        this.upstream = HttpClient.newBuilder()
+        // Prefer the AM's shared client (which is TLS-configured when --triton-tls-enabled is set).
+        // Fall back to a fresh plain client for unit tests that construct the handler without an AM
+        // that owns a Triton client.
+        HttpClient shared = am == null ? null : am.getTritonHttpClient();
+        this.upstream = shared != null ? shared : HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1) // Triton openai_frontend is HTTP/1.1 today.
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
@@ -261,7 +265,8 @@ public class OpenAIProxyHandler implements HttpHandler {
 
         String host = target.getNodeId().getHost();
         int upstreamPort = config.tritonPort;
-        URI upstreamUri = URI.create("http://" + host + ":" + upstreamPort + ex.getRequestURI().getRawPath());
+        URI upstreamUri = URI.create(config.tritonScheme() + "://" + host + ":" + upstreamPort
+                + ex.getRequestURI().getRawPath());
 
         // Build a child CLIENT span for the upstream call; inject W3C headers so Triton can join.
         Map<String, String> upstreamHeaders = new HashMap<>();

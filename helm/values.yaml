@@ -121,6 +121,11 @@ config:
   # TLS (optional)
   tlsEnabled: false
   tlsKeystorePath: ""
+  # South-side TLS: encrypts AM/proxy → Triton traffic. truststore validates Triton's cert;
+  # the optional clientKeystore enables mTLS so Triton can verify TARN back.
+  tritonTlsEnabled: false
+  tritonTlsTruststorePath: ""
+  tritonTlsClientKeystorePath: ""
   # OpenAI proxy
   openaiProxyEnabled: false
   # OpenTelemetry endpoint (consumed by Java agent if attached; see extraJavaOpts).
