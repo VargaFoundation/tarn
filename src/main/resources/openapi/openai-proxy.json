@@ -1,0 +1,303 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "TARN OpenAI-Compatible Proxy",
+    "version": "1.0.0",
+    "description": "OpenAI-compatible inference endpoint served by the TARN orchestrator on top of NVIDIA Triton. Supports chat completions, embeddings, model listing, and token usage. Identity is established via JWT (preferred) or static API token; per-user and per-(user,model) quotas are enforced by the AM."
+  },
+  "servers": [
+    {
+      "url": "https://tarn.example.com",
+      "description": "Replace with your TARN endpoint"
+    }
+  ],
+  "security": [
+    { "BearerAuth": [] },
+    { "TarnToken": [] }
+  ],
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "operationId": "listModels",
+        "summary": "List the models the caller can see",
+        "description": "Result is filtered by Ranger using the caller's identity. Models the caller has no `list` permission on are omitted.",
+        "responses": {
+          "200": {
+            "description": "Models list",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ModelList" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "operationId": "createChatCompletion",
+        "summary": "Create a chat completion",
+        "description": "Forwards the request to a ready Triton container with the smallest queue. When `stream:true`, the response is an SSE stream of `data:` chunks terminated by `data: [DONE]`. The proxy automatically sets `stream_options.include_usage=true` so that token usage is reported in the last chunk and counted against the caller's quota.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Either a full JSON ChatCompletion or an `text/event-stream` of partial deltas",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ChatCompletion" }
+              },
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/v1/embeddings": {
+      "post": {
+        "operationId": "createEmbedding",
+        "summary": "Create an embedding vector",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/EmbeddingRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Embedding response",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/EmbeddingResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/usage": {
+      "post": {
+        "operationId": "reportUsage",
+        "summary": "Out-of-band usage callback",
+        "description": "Triton-side hook to backfill token usage for streamed responses (TARN also extracts usage inline from the SSE stream when `stream_options.include_usage` is set).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UsageReport" }
+            }
+          }
+        },
+        "responses": {
+          "204": { "description": "Recorded" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Bearer JWT issued by your IdP (Keycloak, Auth0, Okta). Validated against the JWKS configured via --oauth-jwks-url."
+      },
+      "TarnToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-TARN-Token",
+        "description": "Legacy static token. Use only when OAuth is not configured."
+      }
+    },
+    "schemas": {
+      "ModelList": {
+        "type": "object",
+        "required": ["object", "data"],
+        "properties": {
+          "object": { "type": "string", "enum": ["list"] },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Model" }
+          }
+        }
+      },
+      "Model": {
+        "type": "object",
+        "required": ["id", "object", "owned_by"],
+        "properties": {
+          "id": { "type": "string", "example": "llama-3-70b" },
+          "object": { "type": "string", "enum": ["model"] },
+          "owned_by": { "type": "string", "example": "tarn" }
+        }
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": ["model", "messages"],
+        "properties": {
+          "model": { "type": "string", "example": "llama-3-70b" },
+          "messages": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ChatMessage" }
+          },
+          "stream": { "type": "boolean", "default": false },
+          "stream_options": {
+            "type": "object",
+            "properties": {
+              "include_usage": { "type": "boolean", "default": true }
+            }
+          },
+          "temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+          "max_tokens": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "ChatMessage": {
+        "type": "object",
+        "required": ["role", "content"],
+        "properties": {
+          "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
+          "content": { "type": "string" }
+        }
+      },
+      "ChatCompletion": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "type": "string", "enum": ["chat.completion"] },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "message": { "$ref": "#/components/schemas/ChatMessage" },
+                "finish_reason": { "type": "string" }
+              }
+            }
+          },
+          "usage": { "$ref": "#/components/schemas/Usage" }
+        }
+      },
+      "EmbeddingRequest": {
+        "type": "object",
+        "required": ["model", "input"],
+        "properties": {
+          "model": { "type": "string" },
+          "input": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "array", "items": { "type": "string" } }
+            ]
+          }
+        }
+      },
+      "EmbeddingResponse": {
+        "type": "object",
+        "properties": {
+          "object": { "type": "string", "enum": ["list"] },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "object": { "type": "string", "enum": ["embedding"] },
+                "embedding": {
+                  "type": "array",
+                  "items": { "type": "number" }
+                },
+                "index": { "type": "integer" }
+              }
+            }
+          },
+          "usage": { "$ref": "#/components/schemas/Usage" }
+        }
+      },
+      "Usage": {
+        "type": "object",
+        "properties": {
+          "prompt_tokens": { "type": "integer", "minimum": 0 },
+          "completion_tokens": { "type": "integer", "minimum": 0 },
+          "total_tokens": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "UsageReport": {
+        "type": "object",
+        "required": ["model", "usage"],
+        "properties": {
+          "model": { "type": "string" },
+          "user": { "type": "string", "description": "Optional override; defaults to the authenticated caller" },
+          "usage": { "$ref": "#/components/schemas/Usage" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string", "example": "permission_denied" },
+              "message": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid credentials",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Authenticated but Ranger denied the action",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Per-user, per-(user,model), or global rate limit exceeded. Response carries a Retry-After header.",
+        "headers": {
+          "Retry-After": {
+            "schema": { "type": "integer" },
+            "description": "Seconds the client should wait before retrying"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "No Triton container is ready to serve",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" }
+          }
+        }
+      }
+    }
+  }
+}

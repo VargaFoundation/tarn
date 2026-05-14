@@ -88,6 +88,13 @@ public class OpenAIProxyServer {
         OpenAIProxyHandler handler = new OpenAIProxyHandler(am, config);
         this.server.createContext("/v1", handler);
         this.server.createContext("/health", new ProxyHealthHandler(am));
+
+        // Self-describing OpenAPI 3 spec + a Swagger UI shell. The spec is static (bundled
+        // in the JAR); the Swagger HTML references CDN assets so we don't ship JS in the
+        // image. Disabling docs is a non-goal for now — overhead is two GET handlers.
+        OpenApiSpecHandler openapi = new OpenApiSpecHandler();
+        this.server.createContext("/v1/openapi.json", openapi);
+        this.server.createContext("/docs", openapi);
     }
 
     public void start() {
