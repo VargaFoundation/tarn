@@ -216,6 +216,19 @@ public class MetricsCollector {
         }
     }
 
+    // Global rate-limit rejections. Tracked separately from QuotaEnforcer counters because
+    // it fires before the request is associated with any user/model.
+    private final java.util.concurrent.atomic.AtomicLong globalRateLimitRejects =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    public void recordGlobalRateLimitReject() {
+        globalRateLimitRejects.incrementAndGet();
+    }
+
+    public long getGlobalRateLimitRejects() {
+        return globalRateLimitRejects.get();
+    }
+
     public double getErrorRate(String model) {
         long requests = requestCountsByModel.getOrDefault(model, 0L);
         long errors = errorCountsByModel.getOrDefault(model, 0L);

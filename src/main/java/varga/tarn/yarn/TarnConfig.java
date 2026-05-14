@@ -108,6 +108,13 @@ public class TarnConfig {
      */
     public int scaleStabilityWindow;
 
+    /**
+     * Process-wide cap on inference requests per second accepted by the OpenAI proxy.
+     * {@code 0} disables the limiter (default). Sits upstream of QuotaEnforcer so
+     * misconfigured per-user quotas can't oversubscribe Triton.
+     */
+    public int globalRateLimitRps;
+
     public TarnConfig() {
         // Defaults from environment or static defaults
         tritonImage = getEnv("TRITON_IMAGE", "nvcr.io/nvidia/tritonserver:24.09-py3");
@@ -167,6 +174,7 @@ public class TarnConfig {
         maxContainers = Integer.parseInt(getEnv("MAX_CONTAINERS", "10"));
         scaleCooldownMs = Long.parseLong(getEnv("SCALE_COOLDOWN_MS", "60000"));
         scaleStabilityWindow = Integer.parseInt(getEnv("SCALE_STABILITY_WINDOW", "1"));
+        globalRateLimitRps = Integer.parseInt(getEnv("GLOBAL_RATE_LIMIT_RPS", "0"));
     }
 
     private String getEnv(String key, String defaultValue) {
@@ -218,6 +226,7 @@ public class TarnConfig {
         if (line.hasOption("max-instances")) maxContainers = Integer.parseInt(line.getOptionValue("max-instances"));
         if (line.hasOption("cooldown")) scaleCooldownMs = Long.parseLong(line.getOptionValue("cooldown"));
         if (line.hasOption("scale-stability-window")) scaleStabilityWindow = Integer.parseInt(line.getOptionValue("scale-stability-window"));
+        if (line.hasOption("global-rate-limit-rps")) globalRateLimitRps = Integer.parseInt(line.getOptionValue("global-rate-limit-rps"));
         if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
         if (line.hasOption("ranger-strict")) rangerStrict = true;
         if (line.hasOption("zk-required")) zkRequired = true;
@@ -260,6 +269,7 @@ public class TarnConfig {
         if (scaleUpThreshold <= 0 || scaleUpThreshold > 1.0) throw new IllegalArgumentException("scaleUpThreshold must be in (0, 1]");
         if (scaleDownThreshold < 0 || scaleDownThreshold >= scaleUpThreshold) throw new IllegalArgumentException("scaleDownThreshold must be in [0, scaleUpThreshold)");
         if (scaleStabilityWindow < 1) throw new IllegalArgumentException("scaleStabilityWindow must be >= 1");
+        if (globalRateLimitRps < 0) throw new IllegalArgumentException("globalRateLimitRps must be >= 0");
         if (tlsEnabled && (tlsKeystorePath == null || tlsKeystorePath.isEmpty())) {
             throw new IllegalArgumentException("--tls-enabled requires --tls-keystore");
         }
@@ -344,6 +354,8 @@ public class TarnConfig {
         options.addOption("c", "cooldown", true, "Scale cooldown in ms");
         options.addOption(null, "scale-stability-window", true,
                 "Consecutive monitor ticks the load must stay past a threshold before scaling (default 1)");
+        options.addOption(null, "global-rate-limit-rps", true,
+                "Process-wide cap on inference requests per second on the OpenAI proxy (0 disables, default 0)");
         options.addOption("cp", "client-port", true, "Client health endpoint port (default: 8889)");
         return options;
     }

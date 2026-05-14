@@ -194,6 +194,25 @@ public class OpenAIProxyHandler implements HttpHandler {
         span.setAttribute(TarnTracing.ATTR_MODEL, baseModel);
         if (lora != null) span.setAttribute(TarnTracing.ATTR_LORA, lora);
 
+        // First gate: process-wide cap on req/s. Sits ahead of every other check so a
+        // misconfigured client can't even cost us a Ranger policy lookup. Disabled by
+        // default (--global-rate-limit-rps=0).
+        varga.tarn.yarn.GlobalRateLimiter globalLimiter = am.getGlobalRateLimiter();
+        if (globalLimiter != null && globalLimiter.isEnabled()) {
+            long waitMs = globalLimiter.tryAcquire();
+            if (waitMs > 0) {
+                span.setStatus(StatusCode.ERROR, "global_rate_limit");
+                am.getMetricsCollector().recordGlobalRateLimitReject();
+                long retryAfterSec = Math.max(1L, (waitMs + 999L) / 1000L);
+                ex.getResponseHeaders().set("Retry-After", String.valueOf(retryAfterSec));
+                writeJsonError(ex, 429, "global_rate_limit",
+                        "Proxy is over its global rate limit ("
+                                + globalLimiter.getRequestsPerSecond()
+                                + " req/s). Retry after " + retryAfterSec + "s.");
+                return;
+            }
+        }
+
         // Quotas run BEFORE Ranger: rate-limit cheaply, don't waste a policy-engine call on
         // a request we're going to reject anyway.
         QuotaEnforcer quotas = am.getQuotaEnforcer();

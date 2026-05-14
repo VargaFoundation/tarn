@@ -86,6 +86,7 @@ public class ApplicationMaster {
     private DiscoveryServer discoveryServer;
     private RangerAuthorizer rangerAuthorizer;
     private QuotaEnforcer quotaEnforcer;
+    private GlobalRateLimiter globalRateLimiter;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
     private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
@@ -129,6 +130,11 @@ public class ApplicationMaster {
 
         rangerAuthorizer = new RangerAuthorizer(config);
         quotaEnforcer = new QuotaEnforcer();
+        globalRateLimiter = new GlobalRateLimiter(config.globalRateLimitRps);
+        if (globalRateLimiter.isEnabled()) {
+            log.info("Global rate limit enabled: {} req/s on the OpenAI proxy",
+                    globalRateLimiter.getRequestsPerSecond());
+        }
         loadQuotasFromConfig();
         // Surface the effective Ranger mode in the AM log at startup so operators can verify
         // what they actually deployed (especially "DISABLED" — easy to misconfigure).
@@ -1112,6 +1118,10 @@ public class ApplicationMaster {
 
     public QuotaEnforcer getQuotaEnforcer() {
         return quotaEnforcer;
+    }
+
+    public GlobalRateLimiter getGlobalRateLimiter() {
+        return globalRateLimiter;
     }
 
     /**

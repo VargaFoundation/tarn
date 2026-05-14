@@ -434,6 +434,12 @@ public class DiscoveryServer {
             sb.append("# TYPE tarn_queue_depth_total gauge\n");
             sb.append("tarn_queue_depth_total ").append(mc.getTotalQueueDepth()).append("\n");
 
+            // Global rate limit rejections — surfaces a backend-saturation guard rail.
+            sb.append("# HELP tarn_global_rate_limit_rejected_total Requests dropped by the process-wide rate limiter\n");
+            sb.append("# TYPE tarn_global_rate_limit_rejected_total counter\n");
+            sb.append("tarn_global_rate_limit_rejected_total ")
+                    .append(mc.getGlobalRateLimitRejects()).append("\n");
+
             synchronized (containers) {
                 for (Container c : containers) {
                     String host = c.getNodeId().getHost();
