@@ -190,6 +190,15 @@ public class MetricsCollector {
         return new LinkedHashMap<>(tokensOutByUserModel);
     }
 
+    /** Token counts for a specific (user, model). Returns 0 when unknown. */
+    public long getPromptTokens(String user, String model) {
+        return tokensInByUserModel.getOrDefault(safe(user) + "|" + safe(model), 0L);
+    }
+
+    public long getCompletionTokens(String user, String model) {
+        return tokensOutByUserModel.getOrDefault(safe(user) + "|" + safe(model), 0L);
+    }
+
     private static String safe(String s) {
         return s == null ? "unknown" : s.replace('|', '_');
     }

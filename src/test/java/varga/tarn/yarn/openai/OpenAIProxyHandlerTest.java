@@ -85,6 +85,11 @@ public class OpenAIProxyHandlerTest {
                     os.flush();
                     os.write("data: {\"delta\":{\"content\":\"llo\"}}\n\n".getBytes(StandardCharsets.UTF_8));
                     os.flush();
+                    // Final usage chunk per OpenAI spec when stream_options.include_usage=true.
+                    os.write(("data: {\"id\":\"x\",\"choices\":[],\"usage\":"
+                            + "{\"prompt_tokens\":7,\"completion_tokens\":11,\"total_tokens\":18}}\n\n")
+                            .getBytes(StandardCharsets.UTF_8));
+                    os.flush();
                     os.write("data: [DONE]\n\n".getBytes(StandardCharsets.UTF_8));
                 }
             } else {
@@ -211,6 +216,9 @@ public class OpenAIProxyHandlerTest {
         assertTrue(resp.body().contains("llo"));
         assertTrue(resp.body().contains("[DONE]"));
         assertTrue(resp.headers().firstValue("Content-Type").orElse("").startsWith("text/event-stream"));
+        // Tokens from the final SSE usage chunk must be accounted to the calling user.
+        assertEquals(7L, metrics.getPromptTokens("alice", "llama-3-70b"));
+        assertEquals(11L, metrics.getCompletionTokens("alice", "llama-3-70b"));
     }
 
     @Test

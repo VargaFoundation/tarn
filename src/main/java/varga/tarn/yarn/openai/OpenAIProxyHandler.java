@@ -280,6 +280,22 @@ public class OpenAIProxyHandler implements HttpHandler {
         boolean streaming = Boolean.TRUE.equals(reqBody.get("stream"));
         span.setAttribute(TarnTracing.ATTR_STREAM, streaming);
 
+        // For streaming requests, force the upstream to emit a final `usage` chunk so we
+        // can extract token counts without buffering the entire response. The OpenAI spec
+        // exposes this opt-in via stream_options.include_usage=true; vLLM / TGI / Triton's
+        // openai_frontend honour it. We always re-serialize the body when streaming because
+        // we may have mutated stream_options.
+        if (streaming) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> opts = (Map<String, Object>) reqBody.get("stream_options");
+            if (opts == null) {
+                opts = new HashMap<>();
+                reqBody.put("stream_options", opts);
+            }
+            opts.put("include_usage", true);
+            body = om.writeValueAsBytes(reqBody);
+        }
+
         MetricsCollector mc = am.getMetricsCollector();
         long startNs = System.nanoTime();
 
@@ -304,13 +320,13 @@ public class OpenAIProxyHandler implements HttpHandler {
                 HttpResponse<InputStream> resp = upstream.send(forwarded,
                         HttpResponse.BodyHandlers.ofInputStream());
                 upstreamSpan.setAttribute("http.status_code", (long) resp.statusCode());
-                relayStreamingResponse(resp, ex);
-                mc.recordModelRequest(baseModel, resp.statusCode() / 100 == 2);
-                // Streaming responses: token usage is in the final "data: {...usage:...}"
-                // chunk per OpenAI spec. Parsing that reliably requires buffering the stream,
-                // which defeats streaming. Operators who need token accounting for streaming
-                // should enable stream_options={"include_usage": true} and point Triton's
-                // openai_frontend at our /v1/usage callback (future work).
+                // Relay byte-for-byte and snapshot the tail; extract usage at end-of-stream
+                // so chargeback works without buffering the whole response. Token accounting
+                // happens BEFORE the response body is closed so a synchronous caller observes
+                // the updated counters as soon as send() returns.
+                boolean ok = resp.statusCode() / 100 == 2;
+                relayStreamingResponseAndAccount(resp, ex, user, baseModel, ok, mc);
+                mc.recordModelRequest(baseModel, ok);
             } else {
                 HttpResponse<byte[]> resp = upstream.send(forwarded,
                         HttpResponse.BodyHandlers.ofByteArray());
@@ -518,20 +534,42 @@ public class OpenAIProxyHandler implements HttpHandler {
      * every chunk so SSE events reach the client immediately. Uses chunked transfer
      * (Content-Length=0 in sendResponseHeaders).
      */
-    private void relayStreamingResponse(HttpResponse<InputStream> resp, HttpExchange ex) throws IOException {
+    private void relayStreamingResponseAndAccount(HttpResponse<InputStream> resp,
+                                                  HttpExchange ex, String user, String model,
+                                                  boolean ok, MetricsCollector mc) throws IOException {
         int status = resp.statusCode();
         String ct = firstHeader(resp, "Content-Type", "text/event-stream");
         ex.getResponseHeaders().set("Content-Type", ct);
         ex.getResponseHeaders().set("Cache-Control", "no-cache");
         ex.getResponseHeaders().set("X-Accel-Buffering", "no"); // Disable nginx buffering if fronted by one.
         ex.sendResponseHeaders(status, 0); // 0 = chunked
+        StreamingUsageExtractor extractor = new StreamingUsageExtractor();
         byte[] buf = new byte[8192];
-        try (InputStream in = resp.body(); OutputStream out = ex.getResponseBody()) {
+        // Note: we DON'T put `out` in the try-with-resources — we want it open after the loop
+        // so we can record token usage before the close lets the client return from send().
+        OutputStream out = ex.getResponseBody();
+        try (InputStream in = resp.body()) {
             int n;
             while ((n = in.read(buf)) != -1) {
                 out.write(buf, 0, n);
                 out.flush();
+                extractor.onChunk(buf, 0, n);
             }
+            // End-of-stream — extract usage and record BEFORE closing the output. A
+            // synchronous client that polls metrics immediately after send() returns must
+            // see the updated counters.
+            if (ok) {
+                com.fasterxml.jackson.databind.JsonNode usage = extractor.findUsage(om);
+                if (usage != null) {
+                    long prompt = usage.path("prompt_tokens").asLong(0);
+                    long completion = usage.path("completion_tokens").asLong(0);
+                    if (prompt > 0 || completion > 0) {
+                        mc.recordTokens(user, model, prompt, completion);
+                    }
+                }
+            }
+        } finally {
+            out.close();
         }
     }
 
