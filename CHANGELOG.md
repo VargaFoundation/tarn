@@ -42,3 +42,31 @@ UTC.
 - Dockerfiles run as UID 10000 to match the Helm `securityContext`.
 - `CONTRIBUTING.md` and `SECURITY.md` documenting contribution flow and
   vulnerability reporting.
+- `TritonDeployment` CRD accepts `spec.accelerator.profile` (NVIDIA MIG, e.g.
+  `2g.10gb`) and `spec.accelerator.sliceSize` for time-slicing on backends that
+  expose fractional resources. The reconciler maps `profile` to
+  `nvidia.com/mig-<profile>` for the K8s resource request.
+- OpenAPI 3 spec served at `/v1/openapi.json` with a Swagger UI shell at
+  `/docs` — clients can now generate SDKs straight from the proxy.
+- `--global-rate-limit-rps` puts a process-wide cap on the OpenAI proxy. Refused
+  requests get HTTP 429 + `Retry-After`; rejects are counted as
+  `tarn_global_rate_limit_rejected_total`.
+- South-side TLS to Triton via `--triton-tls-*` flags (truststore + optional
+  mTLS client keystore). `MetricsCollector` and the OpenAI proxy switch their
+  outbound HttpClient and URI scheme accordingly.
+- OAuth2 / OIDC / JWT authentication backed by Nimbus JOSE+JWT. Setting
+  `--oauth-issuer` / `--oauth-audience` / `--oauth-jwks-url` enforces
+  `Authorization: Bearer` on every proxy endpoint; the legacy static token
+  remains active when OAuth is not configured.
+- Token usage for **streamed** completions: the proxy now forces
+  `stream_options.include_usage=true` and parses the final SSE chunk, so
+  chargeback works for `stream:true` requests too.
+- Sticky routing by `X-Conversation-Id` (`--sticky-routing-enabled`) — the
+  proxy pins follow-ups of a conversation to the same Triton container so the
+  KV cache stays warm. Affinity entries expire after a configurable TTL and
+  are dropped automatically when their container is reaped.
+- Canary auto-promotion MVP in the K8s operator: setting
+  `spec.traffic[].analysis` on a variant starts an SLO gate; after
+  `observationWindowSec` the operator queries Prometheus for error rate and
+  p95 latency vs. the baseline variant, and on success promotes the canary
+  to 100% by patching `spec.traffic` weights.
