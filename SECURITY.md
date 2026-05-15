@@ -54,16 +54,28 @@ Out of scope:
 
 For context on what is *already* enforced (so you can focus on what isn't):
 
-- Constant-time API-token comparison; token only accepted via the
-  `X-TARN-Token` header (never as a query parameter).
+- OIDC / OAuth2 bearer-JWT authentication (Nimbus JOSE+JWT): when
+  `--oauth-issuer` / `--oauth-audience` / `--oauth-jwks-url` are set, every
+  proxy endpoint requires a signature-, issuer-, audience- and expiry-validated
+  `Authorization: Bearer` token, and identity comes from the JWT `sub` claim
+  (client-supplied `X-*` user headers are then ignored, so callers cannot
+  impersonate).
+- Constant-time API-token comparison for the legacy static token; token only
+  accepted via the `X-TARN-Token` header (never as a query parameter).
 - Shell-metacharacter rejection on all user-supplied paths
   (`TritonCommandBuilder.requireSafePath`).
 - SSRF guard on outbound metric scrapes (loopback / link-local / metadata
   endpoints refused).
 - Mandatory TLSv1.2+ for admin HTTPS / OpenAI proxy when TLS is enabled.
+- South-side TLS to Triton (`--triton-tls-*`): the AM/proxy can verify Triton's
+  certificate against a truststore and present a client keystore for mTLS so
+  Triton can authenticate TARN in return.
 - Ranger fail-closed (`--ranger-strict`) when a Ranger service is configured.
 - OpenAI proxy enforces Ranger + per-user quotas *before* forwarding to
   Triton.
+- Token chargeback covers streaming completions: the proxy forces
+  `stream_options.include_usage=true` and parses the final SSE chunk, so
+  `stream: true` requests are accounted just like non-streaming ones.
 - JCEKS-backed secret resolution — passwords never on the command line.
 - Helm pod runs as UID 10000 with `readOnlyRootFilesystem`, dropped
   capabilities, RuntimeDefault seccomp profile.
@@ -71,12 +83,19 @@ For context on what is *already* enforced (so you can focus on what isn't):
 
 ## Known gaps
 
-We are tracking these openly in the plan file
-(`/home/devil/.claude/plans/analyse-le-projet-trouve-lazy-cascade.md` —
-internal) and in the repository's issue list:
+These are tracked in the repository's issue list; patches are very welcome —
+see [CONTRIBUTING.md](CONTRIBUTING.md):
 
-- mTLS between AM and Triton workers is not yet wired (north-side TLS only).
-- No OAuth2 / OIDC / JWT support — single shared token is the only API auth.
-- Streaming-mode (`stream: true`) requests don't account tokens for chargeback.
-
-Patches in these areas are very welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+- **Per-replica enforcement.** Quotas and the global rate limit are enforced in
+  process-local memory, and conversation affinity (KV-cache sticky routing) is
+  held per process. Running more than one replica therefore multiplies the
+  effective limits (each replica enforces its own copy), and affinity is neither
+  shared across replicas nor preserved across a restart. Shared-state backends
+  (ZooKeeper / Redis) that make these correct under horizontal scaling are in
+  progress; until then, enforce limits with a single replica or an upstream
+  gateway.
+- **No response or embedding cache.** Identical requests are always forwarded
+  upstream; only Triton's in-process KV cache is reused (via sticky routing).
+- **Request-rate quotas only.** Quotas cap requests per minute; there is no
+  token- or cost-based budget enforcement (token usage is metered but not
+  capped).
