@@ -79,6 +79,14 @@
                             <span class="text-gray-500" title="No rangerService configured; allow-all">Disabled</span>
                         </#if>
                     </p>
+                    <p class="flex justify-between mt-2"><span>Shared State:</span>
+                        <#assign ssMode = (sharedStateMode!"local")>
+                        <#if ssMode == "zk">
+                            <span class="text-green-500 font-semibold" title="Quotas, global rate limit and conversation affinity shared across replicas via ZooKeeper">ZooKeeper (${(liveReplicaCount!1)?c} replica<#if (liveReplicaCount!1) != 1>s</#if>)</span>
+                        <#else>
+                            <span class="text-gray-500" title="Per-process enforcement; correct for a single replica">Local</span>
+                        </#if>
+                    </p>
                 </div>
             </div>
             

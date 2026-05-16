@@ -86,10 +86,12 @@ public class ApplicationMaster {
     private DiscoveryServer discoveryServer;
     private RangerAuthorizer rangerAuthorizer;
     private QuotaEnforcer quotaEnforcer;
+    private TokenBudgetEnforcer budgetEnforcer;
     private GlobalRateLimiter globalRateLimiter;
     private java.net.http.HttpClient tritonHttpClient;
     private varga.tarn.yarn.auth.JwtValidator jwtValidator;
     private varga.tarn.yarn.openai.ConversationAffinity conversationAffinity;
+    private varga.tarn.yarn.openai.EmbeddingCache embeddingCache;
     private PlacementConstraint tritonConstraint;
     private CuratorFramework zkClient;
     private final RetryPolicy zkRetryPolicy = RetryPolicy.defaultPolicy();
@@ -97,6 +99,7 @@ public class ApplicationMaster {
     private ScheduledExecutorService drainExecutor;
     private OpenAIProxyServer openaiProxy;
     private NodeCache quotasNodeCache;
+    private varga.tarn.yarn.shared.SharedState sharedState;
     // Timeout used when blocking on ZK connect at startup.
     private static final int ZK_CONNECT_TIMEOUT_SECONDS = 30;
 
@@ -128,14 +131,14 @@ public class ApplicationMaster {
         discoveryServer = new DiscoveryServer(config, this, conf);
         discoveryServer.start();
 
-        if (config.openaiProxyEnabled) {
-            openaiProxy = new OpenAIProxyServer(config, this, conf);
-            openaiProxy.start();
-        }
-
         rangerAuthorizer = new RangerAuthorizer(config);
         quotaEnforcer = new QuotaEnforcer();
+        budgetEnforcer = new TokenBudgetEnforcer();
         globalRateLimiter = new GlobalRateLimiter(config.globalRateLimitRps);
+        embeddingCache = new varga.tarn.yarn.openai.EmbeddingCache(config.embeddingCacheSize);
+        if (embeddingCache.isEnabled()) {
+            log.info("Embedding cache enabled (max {} entries)", config.embeddingCacheSize);
+        }
         if (config.stickyRoutingEnabled) {
             this.conversationAffinity = new varga.tarn.yarn.openai.ConversationAffinity(
                     config.stickyRoutingTtlMs);
@@ -170,6 +173,18 @@ public class ApplicationMaster {
         }
 
         initZookeeper();
+
+        // Wire the shared-state backend now that the ZK client (if any) exists, then install its
+        // stores into the already-constructed components. Default mode "local" installs nothing,
+        // so single-replica behaviour is unchanged.
+        initSharedState();
+
+        // Start the OpenAI proxy only after quotas/rate-limit/affinity (and their shared backend)
+        // are wired, so it never serves inference before enforcement is ready.
+        if (config.openaiProxyEnabled) {
+            openaiProxy = new OpenAIProxyServer(config, this, conf);
+            openaiProxy.start();
+        }
 
         // Initialize RM Client
         amRMClient = AMRMClientAsync.createAMRMClientAsync(1000, new RMCallbackHandler());
@@ -319,8 +334,9 @@ public class ApplicationMaster {
                     String json = new String(data, java.nio.charset.StandardCharsets.UTF_8);
                     log.info("ZK quotas znode updated ({} bytes), hot-reloading", data.length);
                     quotaEnforcer.loadFromJson(json);
+                    budgetEnforcer.loadFromJson(json);
                     metricsCollector.recordAlert("quota_reloaded",
-                            "Quota rules hot-reloaded from ZK (" + data.length + " bytes)", "info");
+                            "Quota + budget rules hot-reloaded from ZK (" + data.length + " bytes)", "info");
                 }
             });
             quotasNodeCache.start(true);
@@ -335,6 +351,52 @@ public class ApplicationMaster {
         int lastSlash = config.zkPath.lastIndexOf('/');
         String parent = lastSlash > 0 ? config.zkPath.substring(0, lastSlash) : "/services/triton";
         return parent + "/config";
+    }
+
+    /** ZK root for shared state: a sibling of the instances path (e.g. /services/triton/shared). */
+    private String sharedRootPath() {
+        if (config.sharedStatePath != null && !config.sharedStatePath.isEmpty()) {
+            return config.sharedStatePath;
+        }
+        int lastSlash = config.zkPath.lastIndexOf('/');
+        String parent = lastSlash > 0 ? config.zkPath.substring(0, lastSlash) : "/services/triton";
+        return parent + "/shared";
+    }
+
+    /**
+     * Creates the shared-state provider for {@code --shared-state} and installs its stores into the
+     * quota enforcer, global rate limiter and conversation affinity. In {@code local} mode (the
+     * default) the provider supplies null stores, so the components keep their in-process state and
+     * behaviour is unchanged. In {@code zk} mode the existing Curator client is reused so quotas and
+     * the global rate limit are enforced fair-share across replicas and affinity is shared.
+     */
+    private void initSharedState() {
+        sharedState = varga.tarn.yarn.shared.SharedState.create(
+                config.sharedState, sharedRootPath(), zkClient);
+        try {
+            sharedState.start();
+        } catch (Exception e) {
+            log.warn("Shared-state '{}' failed to start ({}); falling back to local",
+                    sharedState.mode(), e.toString());
+            try { sharedState.close(); } catch (Exception ignore) { }
+            sharedState = new varga.tarn.yarn.shared.LocalSharedState();
+        }
+        varga.tarn.yarn.shared.RateLimitStore rl = sharedState.rateLimits();
+        if (rl != null) {
+            quotaEnforcer.setRateLimitStore(rl);
+            globalRateLimiter.setRateLimitStore(rl);
+        }
+        if (conversationAffinity != null && sharedState.affinity() != null) {
+            conversationAffinity.setAffinityStore(sharedState.affinity());
+        }
+        // Budgets fair-share by the live replica count (1 in local mode => full budget).
+        budgetEnforcer.setReplicaCountSupplier(() -> sharedState.liveReplicaCount());
+        if (!"local".equals(sharedState.mode())) {
+            log.info("Shared-state mode: {} (replicaId={}, liveReplicas={})",
+                    sharedState.mode(), sharedState.replicaId(), sharedState.liveReplicaCount());
+            metricsCollector.recordAlert("shared_state_active",
+                    "Shared-state backend '" + sharedState.mode() + "' active", "info");
+        }
     }
 
     private ConnectionStateListener newConnectionStateListener() {
@@ -385,6 +447,9 @@ public class ApplicationMaster {
         }
         if (quotasNodeCache != null) {
             try { quotasNodeCache.close(); } catch (Exception ignore) {}
+        }
+        if (sharedState != null) {
+            try { sharedState.close(); } catch (Exception ignore) {}
         }
         if (zkClient != null) {
             zkClient.close();
@@ -1148,6 +1213,10 @@ public class ApplicationMaster {
         return quotaEnforcer;
     }
 
+    public TokenBudgetEnforcer getTokenBudgetEnforcer() {
+        return budgetEnforcer;
+    }
+
     public GlobalRateLimiter getGlobalRateLimiter() {
         return globalRateLimiter;
     }
@@ -1185,6 +1254,16 @@ public class ApplicationMaster {
         return conversationAffinity;
     }
 
+    /** Per-process embedding response cache (check {@code isEnabled()}); never null after run(). */
+    public varga.tarn.yarn.openai.EmbeddingCache getEmbeddingCache() {
+        return embeddingCache;
+    }
+
+    /** Shared-state backend (set once {@link #run()} starts); exposes mode + live replica count. */
+    public varga.tarn.yarn.shared.SharedState getSharedState() {
+        return sharedState;
+    }
+
     /**
      * Writes a new quota JSON to the shared ZK config znode so every AM replica picks it up
      * through its {@link NodeCache} listener. This is the multi-replica write path used by the
@@ -1195,6 +1274,7 @@ public class ApplicationMaster {
             // Single-instance fallback: apply locally so the operator sees the effect even
             // when ZK isn't configured.
             quotaEnforcer.loadFromJson(json);
+            budgetEnforcer.loadFromJson(json);
             return false;
         }
         try {
@@ -1208,6 +1288,7 @@ public class ApplicationMaster {
             log.error("Failed to publish quotas to ZK: {}", e.getMessage());
             // Degrade gracefully: apply locally even if ZK write failed.
             quotaEnforcer.loadFromJson(json);
+            budgetEnforcer.loadFromJson(json);
             return false;
         }
     }
@@ -1231,7 +1312,9 @@ public class ApplicationMaster {
             try (java.io.InputStream in = fs.open(p)) {
                 bytes = in.readAllBytes();
             }
-            quotaEnforcer.loadFromJson(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
+            String json = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+            quotaEnforcer.loadFromJson(json);
+            budgetEnforcer.loadFromJson(json);
         } catch (Exception e) {
             log.error("Failed to load quotas from {}: {}", config.quotasPath, e.getMessage());
         }

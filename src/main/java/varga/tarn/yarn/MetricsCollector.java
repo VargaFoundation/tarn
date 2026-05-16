@@ -252,6 +252,40 @@ public class MetricsCollector {
         return globalRateLimitRejects.get();
     }
 
+    // Requests refused because the caller exhausted their daily token budget.
+    private final java.util.concurrent.atomic.AtomicLong tokenBudgetRejects =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    public void recordTokenBudgetReject() {
+        tokenBudgetRejects.incrementAndGet();
+    }
+
+    public long getTokenBudgetRejects() {
+        return tokenBudgetRejects.get();
+    }
+
+    // Embedding response cache hits/misses — cheap to track, tells you the cache's payoff.
+    private final java.util.concurrent.atomic.AtomicLong embeddingCacheHits =
+            new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong embeddingCacheMisses =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    public void recordEmbeddingCacheHit() {
+        embeddingCacheHits.incrementAndGet();
+    }
+
+    public void recordEmbeddingCacheMiss() {
+        embeddingCacheMisses.incrementAndGet();
+    }
+
+    public long getEmbeddingCacheHits() {
+        return embeddingCacheHits.get();
+    }
+
+    public long getEmbeddingCacheMisses() {
+        return embeddingCacheMisses.get();
+    }
+
     public double getErrorRate(String model) {
         long requests = requestCountsByModel.getOrDefault(model, 0L);
         long errors = errorCountsByModel.getOrDefault(model, 0L);

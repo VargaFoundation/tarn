@@ -21,6 +21,7 @@ package varga.tarn.yarn.openai;
  */
 
 import org.apache.hadoop.yarn.api.records.ContainerId;
+import varga.tarn.yarn.shared.AffinityStore;
 
 import java.util.Iterator;
 import java.util.Map;
@@ -41,9 +42,17 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class ConversationAffinity {
 
     private final long ttlMs;
+    // Optional shared backend. When installed (--shared-state=zk), affinity is shared across
+    // replicas and survives a restart; null = the in-process map below (single-replica default).
+    private volatile AffinityStore store;
 
     public ConversationAffinity(long ttlMs) {
         this.ttlMs = ttlMs;
+    }
+
+    /** Installs a shared affinity backend; pass {@code null} to keep the in-process map. */
+    public void setAffinityStore(AffinityStore store) {
+        this.store = store;
     }
 
     private static final class Entry {
@@ -57,6 +66,11 @@ public final class ConversationAffinity {
     /** Returns the recorded container id or {@code null} if absent / expired. */
     public ContainerId get(String conversationId) {
         if (conversationId == null || conversationId.isEmpty()) return null;
+        AffinityStore s = store;
+        if (s != null) {
+            String cid = s.get(conversationId);
+            return cid == null ? null : toContainerId(cid);
+        }
         Entry e = byConversation.get(conversationId);
         if (e == null) return null;
         if (System.currentTimeMillis() > e.expiryMs) {
@@ -69,12 +83,19 @@ public final class ConversationAffinity {
     /** Records (or refreshes) the affinity. Caller has already verified the container is alive. */
     public void put(String conversationId, ContainerId containerId) {
         if (conversationId == null || conversationId.isEmpty() || containerId == null) return;
+        AffinityStore s = store;
+        if (s != null) {
+            s.put(conversationId, containerId.toString(), ttlMs);
+            return;
+        }
         byConversation.put(conversationId, new Entry(containerId, System.currentTimeMillis() + ttlMs));
     }
 
     /** Drops every entry pinning the given container — called when the container is reaped. */
     public int evictByContainer(ContainerId containerId) {
         if (containerId == null) return 0;
+        AffinityStore s = store;
+        if (s != null) return s.evictByContainer(containerId.toString());
         int removed = 0;
         Iterator<Map.Entry<String, Entry>> it = byConversation.entrySet().iterator();
         while (it.hasNext()) {
@@ -89,6 +110,8 @@ public final class ConversationAffinity {
 
     /** Removes expired entries. Called periodically — cheap, O(entries). */
     public int purgeExpired() {
+        AffinityStore s = store;
+        if (s != null) return s.purgeExpired();
         long now = System.currentTimeMillis();
         int removed = 0;
         Iterator<Map.Entry<String, Entry>> it = byConversation.entrySet().iterator();
@@ -102,6 +125,16 @@ public final class ConversationAffinity {
     }
 
     public int size() {
+        AffinityStore s = store;
+        if (s != null) return s.size();
         return byConversation.size();
+    }
+
+    private static ContainerId toContainerId(String s) {
+        try {
+            return ContainerId.fromString(s);
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

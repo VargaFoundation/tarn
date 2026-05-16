@@ -237,6 +237,24 @@ public class OpenAIProxyHandler implements HttpHandler {
             }
         }
 
+        // Daily token-budget gate. Soft cap on already-consumed tokens: the request that crosses
+        // the line still goes through, subsequent ones are refused until the window rolls. Cheap,
+        // so it runs before the Ranger policy lookup.
+        varga.tarn.yarn.TokenBudgetEnforcer budgets = am.getTokenBudgetEnforcer();
+        if (budgets != null) {
+            varga.tarn.yarn.TokenBudgetEnforcer.Decision b = budgets.check(user, groups);
+            if (!b.allowed) {
+                span.setStatus(StatusCode.ERROR, "budget_exceeded");
+                am.getMetricsCollector().recordTokenBudgetReject();
+                long retryAfterSec = Math.max(1L, (b.retryAfterMs + 999L) / 1000L);
+                ex.getResponseHeaders().set("Retry-After", String.valueOf(retryAfterSec));
+                writeJsonError(ex, 429, "budget_exceeded",
+                        "Daily token budget exhausted (" + b.ruleDesc + "). Resets in "
+                                + retryAfterSec + "s.");
+                return;
+            }
+        }
+
         String clientIp = resolveClientIp(ex);
         RangerAuthorizer ra = am.getRangerAuthorizer();
         if (ra != null) {
@@ -256,6 +274,24 @@ public class OpenAIProxyHandler implements HttpHandler {
                         "Access to LoRA '" + lora + "' on '" + baseModel + "' is denied by policy");
                 return;
             }
+        }
+
+        // Embedding cache: embeddings are deterministic, so an exact-match hit skips the upstream
+        // call entirely. Runs AFTER auth/quota/budget/Ranger so a cached response still respects
+        // policy; only the GPU compute is skipped (a hit costs no tokens and no budget).
+        boolean isEmbeddings = ex.getRequestURI().getPath().endsWith("/embeddings");
+        EmbeddingCache embCache = am.getEmbeddingCache();
+        String embCacheKey = null;
+        if (isEmbeddings && embCache != null && embCache.isEnabled()) {
+            embCacheKey = EmbeddingCache.keyFor(body);
+            EmbeddingCache.Entry cached = embCache.get(embCacheKey);
+            if (cached != null) {
+                am.getMetricsCollector().recordEmbeddingCacheHit();
+                span.setAttribute("tarn.embedding_cache", "hit");
+                writeResponse(ex, 200, cached.contentType, cached.body);
+                return;
+            }
+            am.getMetricsCollector().recordEmbeddingCacheMiss();
         }
 
         // Sticky routing: when a client sets X-Conversation-Id, send the request to the
@@ -359,6 +395,10 @@ public class OpenAIProxyHandler implements HttpHandler {
                 mc.recordModelRequest(baseModel, ok);
                 if (ok) {
                     recordTokensIfPresent(resp.body(), user, baseModel);
+                    if (isEmbeddings && embCacheKey != null) {
+                        embCache.put(embCacheKey, resp.body(),
+                                firstHeader(resp, "Content-Type", "application/json"));
+                    }
                 }
                 writeResponse(ex, resp.statusCode(),
                         firstHeader(resp, "Content-Type", "application/json"),
@@ -431,6 +471,7 @@ public class OpenAIProxyHandler implements HttpHandler {
         // Otherwise fall back to the authenticated principal.
         String user = getUser(ex);
         am.getMetricsCollector().recordTokens(user, model, prompt, completion);
+        recordBudgetUsage(user, prompt + completion);
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("recorded", true);
         resp.put("user", user);
@@ -454,10 +495,17 @@ public class OpenAIProxyHandler implements HttpHandler {
             long completion = usage.path("completion_tokens").asLong(0);
             if (prompt > 0 || completion > 0) {
                 am.getMetricsCollector().recordTokens(user, model, prompt, completion);
+                recordBudgetUsage(user, prompt + completion);
             }
         } catch (Exception ignored) {
             // Non-OpenAI shaped response (e.g. image generation): no usage to record.
         }
+    }
+
+    /** Accounts tokens against the caller's daily budget window (no-op when budgets are off). */
+    private void recordBudgetUsage(String user, long tokens) {
+        varga.tarn.yarn.TokenBudgetEnforcer budgets = am == null ? null : am.getTokenBudgetEnforcer();
+        if (budgets != null) budgets.recordUsage(user, tokens);
     }
 
     /**
@@ -598,6 +646,7 @@ public class OpenAIProxyHandler implements HttpHandler {
                     long completion = usage.path("completion_tokens").asLong(0);
                     if (prompt > 0 || completion > 0) {
                         mc.recordTokens(user, model, prompt, completion);
+                        recordBudgetUsage(user, prompt + completion);
                     }
                 }
             }

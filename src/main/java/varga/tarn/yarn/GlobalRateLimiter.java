@@ -33,16 +33,25 @@ public final class GlobalRateLimiter {
 
     private final int requestsPerSecond;
     private final QuotaEnforcer.TokenBucket bucket;
+    // Optional shared backend. When installed (--shared-state=zk), the cap holds cluster-wide
+    // (fair-share across replicas). Null = the in-process bucket below — single-replica default.
+    private volatile varga.tarn.yarn.shared.RateLimitStore store;
 
     public GlobalRateLimiter(int requestsPerSecond) {
         this.requestsPerSecond = requestsPerSecond;
         this.bucket = new QuotaEnforcer.TokenBucket(Math.max(1, requestsPerSecond), 1000L);
     }
 
+    /** Installs a shared rate-limit backend; pass {@code null} to keep the in-process bucket. */
+    public void setRateLimitStore(varga.tarn.yarn.shared.RateLimitStore store) {
+        this.store = store;
+    }
+
     /** Returns 0 when the request is allowed, or milliseconds to wait until next slot. */
     public long tryAcquire() {
         if (requestsPerSecond <= 0) return 0L;
-        return bucket.tryAcquire();
+        varga.tarn.yarn.shared.RateLimitStore s = store;
+        return s == null ? bucket.tryAcquire() : s.acquireGlobal(requestsPerSecond);
     }
 
     public int getRequestsPerSecond() {

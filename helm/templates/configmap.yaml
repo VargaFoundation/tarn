@@ -26,12 +26,17 @@ data:
   {{- end }}
   # OpenAI proxy
   OPENAI_PROXY_ENABLED: {{ .Values.config.openaiProxyEnabled | quote }}
+  EMBEDDING_CACHE_SIZE: {{ .Values.config.embeddingCacheSize | default 0 | quote }}
   # OTEL
   {{- if .Values.config.otelEndpoint }}
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.config.otelEndpoint | quote }}
   {{- end }}
   # Scaling
   SCALE_MODE: {{ .Values.config.scaleMode | quote }}
+  # Cross-replica enforcement: local (default) | zk. "zk" reuses ZK_ENSEMBLE above so the global
+  # rate limit and per-user quotas are fair-shared across replicas and conversation affinity is
+  # shared. Recommended whenever replicaCount > 1.
+  SHARED_STATE: {{ .Values.config.sharedState | default "local" | quote }}
   # Safety defaults
   RANGER_STRICT: {{ .Values.config.rangerStrict | quote }}
   ZK_REQUIRED: {{ .Values.config.zkRequired | quote }}

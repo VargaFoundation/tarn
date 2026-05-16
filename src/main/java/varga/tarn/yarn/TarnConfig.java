@@ -152,6 +152,23 @@ public class TarnConfig {
     public boolean stickyRoutingEnabled;
     public long stickyRoutingTtlMs;
 
+    /**
+     * Shared-state backend for cross-replica enforcement: {@code local} (default; per-process
+     * in-memory state, correct for a single replica) or {@code zk} (reuse the Curator client so
+     * quotas, the global rate limit and conversation affinity hold across replicas). When
+     * {@code zk} is selected without a ZooKeeper ensemble, TARN falls back to {@code local}.
+     */
+    public String sharedState;
+    /** ZK root for shared state. Null = derived as a sibling of {@link #zkPath} ({@code .../shared}). */
+    public String sharedStatePath;
+
+    /**
+     * Max entries in the per-process embedding response cache. Embeddings are deterministic, so an
+     * exact-match cache skips redundant GPU work (great for RAG re-embedding). {@code 0} disables
+     * it (default); each replica keeps its own cache.
+     */
+    public int embeddingCacheSize;
+
     public TarnConfig() {
         // Defaults from environment or static defaults
         tritonImage = getEnv("TRITON_IMAGE", "nvcr.io/nvidia/tritonserver:24.09-py3");
@@ -231,6 +248,9 @@ public class TarnConfig {
         globalRateLimitRps = Integer.parseInt(getEnv("GLOBAL_RATE_LIMIT_RPS", "0"));
         stickyRoutingEnabled = Boolean.parseBoolean(getEnv("STICKY_ROUTING_ENABLED", "false"));
         stickyRoutingTtlMs = Long.parseLong(getEnv("STICKY_ROUTING_TTL_MS", "3600000"));
+        sharedState = getEnv("SHARED_STATE", "local");
+        sharedStatePath = getEnv("SHARED_STATE_PATH", null);
+        embeddingCacheSize = Integer.parseInt(getEnv("EMBEDDING_CACHE_SIZE", "0"));
     }
 
     private String getEnv(String key, String defaultValue) {
@@ -285,6 +305,9 @@ public class TarnConfig {
         if (line.hasOption("global-rate-limit-rps")) globalRateLimitRps = Integer.parseInt(line.getOptionValue("global-rate-limit-rps"));
         if (line.hasOption("sticky-routing-enabled")) stickyRoutingEnabled = true;
         if (line.hasOption("sticky-routing-ttl-ms")) stickyRoutingTtlMs = Long.parseLong(line.getOptionValue("sticky-routing-ttl-ms"));
+        if (line.hasOption("shared-state")) sharedState = line.getOptionValue("shared-state");
+        if (line.hasOption("shared-state-path")) sharedStatePath = line.getOptionValue("shared-state-path");
+        if (line.hasOption("embedding-cache-size")) embeddingCacheSize = Integer.parseInt(line.getOptionValue("embedding-cache-size"));
         if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
         if (line.hasOption("ranger-strict")) rangerStrict = true;
         if (line.hasOption("zk-required")) zkRequired = true;
@@ -340,6 +363,13 @@ public class TarnConfig {
         if (scaleStabilityWindow < 1) throw new IllegalArgumentException("scaleStabilityWindow must be >= 1");
         if (globalRateLimitRps < 0) throw new IllegalArgumentException("globalRateLimitRps must be >= 0");
         if (stickyRoutingTtlMs < 1_000L) throw new IllegalArgumentException("stickyRoutingTtlMs must be >= 1000");
+        if (sharedState != null) {
+            String ss = sharedState.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!ss.equals("local") && !ss.equals("zk")) {
+                throw new IllegalArgumentException("--shared-state must be 'local' or 'zk', got '" + sharedState + "'");
+            }
+        }
+        if (embeddingCacheSize < 0) throw new IllegalArgumentException("embeddingCacheSize must be >= 0");
         if (tlsEnabled && (tlsKeystorePath == null || tlsKeystorePath.isEmpty())) {
             throw new IllegalArgumentException("--tls-enabled requires --tls-keystore");
         }
@@ -452,6 +482,12 @@ public class TarnConfig {
                 "Honour X-Conversation-Id in the proxy to route follow-ups to the same container (KV-cache reuse)");
         options.addOption(null, "sticky-routing-ttl-ms", true,
                 "Affinity TTL in ms when sticky routing is on (default 3600000 = 1h)");
+        options.addOption(null, "shared-state", true,
+                "Cross-replica state backend: local (default) | zk (reuse ZooKeeper for fair-share quotas/rate-limit and shared, restart-surviving affinity)");
+        options.addOption(null, "shared-state-path", true,
+                "ZK root for shared state (default: sibling of --zk-path, e.g. /services/triton/shared)");
+        options.addOption(null, "embedding-cache-size", true,
+                "Max entries in the per-process embedding response cache (0 disables, default 0)");
         options.addOption("cp", "client-port", true, "Client health endpoint port (default: 8889)");
         return options;
     }

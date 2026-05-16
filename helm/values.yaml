@@ -128,17 +128,28 @@ config:
   tritonTlsClientKeystorePath: ""
   # OpenAI proxy
   openaiProxyEnabled: false
+  # Per-process embedding response cache (exact-match LRU). 0 disables; raise it (e.g. 50000) for
+  # RAG workloads that re-embed the same documents/queries to skip redundant GPU work.
+  embeddingCacheSize: 0
   # OpenTelemetry endpoint (consumed by Java agent if attached; see extraJavaOpts).
   otelEndpoint: ""
   # Scaling
   scaleMode: "composite"
+  # Cross-replica enforcement backend. "local" (default) keeps per-process quotas / rate-limit /
+  # affinity — correct for replicaCount: 1. Set to "zk" when running multiple replicas so the
+  # global rate limit and per-user quotas are fair-shared across the fleet (instead of each
+  # replica enforcing its own copy, i.e. ~N× too loose) and conversation affinity is shared and
+  # survives restarts. "zk" reuses zookeeperQuorum above.
+  sharedState: "local"
   # Ranger strict mode (denies by default when plugin init fails).
   rangerStrict: true
   # ZK required (AM refuses to start if ZK is unreachable).
   zkRequired: true
 
-# Extra Java system properties, mostly for the OpenTelemetry agent:
-#   -javaagent:/opt/otel/opentelemetry-javaagent.jar
+# Extra Java system properties. To enable OpenTelemetry tracing, mount the agent (e.g. via an
+# initContainer or a baked image) and point it at your collector — see docs/runbook.md "Tracing":
+#   extraJavaOpts: "-javaagent:/opt/otel/opentelemetry-javaagent.jar -Dotel.service.name=tarn -Dotel.exporter.otlp.endpoint=http://otel-collector:4317"
+# The OTLP endpoint can also be set via config.otelEndpoint (exported as OTEL_EXPORTER_OTLP_ENDPOINT).
 extraJavaOpts: ""
 
 # Kubernetes Operator (P2.1). Disabled by default — enables the TritonDeployment CRD

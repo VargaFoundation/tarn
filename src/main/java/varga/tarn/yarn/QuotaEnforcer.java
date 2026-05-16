@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import varga.tarn.yarn.shared.RateLimitStore;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -124,6 +125,15 @@ public class QuotaEnforcer {
     // Token buckets keyed by "user|model" for rules that match on user, or "group|..." etc.
     // Buckets are lazily created per-caller when first hit.
     private final Map<String, TokenBucket> buckets = new ConcurrentHashMap<>();
+    // Optional shared backend. When installed (e.g. --shared-state=zk), per-rule limits hold
+    // cluster-wide (fair-share across replicas) instead of per-process. Null = the in-memory
+    // buckets above, i.e. the single-replica default — unchanged behaviour.
+    private volatile RateLimitStore store;
+
+    /** Installs a shared rate-limit backend; pass {@code null} to keep the in-memory buckets. */
+    public void setRateLimitStore(RateLimitStore store) {
+        this.store = store;
+    }
 
     public String getCurrentRulesJson() {
         return lastLoadedJson;
@@ -152,6 +162,8 @@ public class QuotaEnforcer {
             parsed.sort((a, b) -> Integer.compare(b.specificity(), a.specificity()));
             this.rules = parsed;
             this.buckets.clear(); // New rules invalidate old buckets.
+            RateLimitStore s = store;
+            if (s != null) s.invalidate();
             this.lastLoadedJson = json == null ? "{\"rules\":[]}" : json;
             log.info("Loaded {} quota rule(s)", parsed.size());
         } catch (Exception e) {
@@ -165,6 +177,8 @@ public class QuotaEnforcer {
         list.add(new Rule(null, null, "*", requestsPerMinute));
         this.rules = list;
         this.buckets.clear();
+        RateLimitStore s = store;
+        if (s != null) s.invalidate();
         this.lastLoadedJson = "{\"rules\":[{\"model\":\"*\",\"requestsPerMinute\":" + requestsPerMinute + "}]}";
     }
 
@@ -186,9 +200,16 @@ public class QuotaEnforcer {
 
         String key = bucketKey(matched, user, groups, model);
         final int rpm = matched.requestsPerMinute;
-        TokenBucket bucket = buckets.computeIfAbsent(key,
-                k -> new TokenBucket(rpm, 60_000L));
-        long waitMs = bucket.tryAcquire();
+        long waitMs;
+        RateLimitStore s = store;
+        if (s != null) {
+            // Shared backend: the rpm is a cluster-wide ceiling, enforced fair-share per replica.
+            waitMs = s.acquireQuota(key, rpm);
+        } else {
+            TokenBucket bucket = buckets.computeIfAbsent(key,
+                    k -> new TokenBucket(rpm, 60_000L));
+            waitMs = bucket.tryAcquire();
+        }
         if (waitMs == 0) return Decision.allow();
         return Decision.deny(waitMs, "rate_limited", describe(matched));
     }
@@ -213,20 +234,20 @@ public class QuotaEnforcer {
      * Windowed rather than sliding-window for implementation simplicity; returns
      * {@code 0} on grant, or the milliseconds until the next refill on refusal.
      */
-    static final class TokenBucket {
+    public static final class TokenBucket {
         private final int capacity;
         private final long windowMs;
         private long windowStart;
         private int remaining;
 
-        TokenBucket(int capacity, long windowMs) {
+        public TokenBucket(int capacity, long windowMs) {
             this.capacity = capacity;
             this.windowMs = windowMs;
             this.windowStart = System.currentTimeMillis();
             this.remaining = capacity;
         }
 
-        synchronized long tryAcquire() {
+        public synchronized long tryAcquire() {
             long now = System.currentTimeMillis();
             long elapsed = now - windowStart;
             if (elapsed >= windowMs) {

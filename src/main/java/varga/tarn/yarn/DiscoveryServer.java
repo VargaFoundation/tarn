@@ -336,6 +336,16 @@ public class DiscoveryServer {
                 model.put("quotasJson", qe.getCurrentRulesJson());
                 model.put("quotaRuleCount", qe.getRuleCount());
             }
+            TokenBudgetEnforcer be = am.getTokenBudgetEnforcer();
+            if (be != null) {
+                model.put("budgetRuleCount", be.getRuleCount());
+            }
+
+            // Shared-state backend (mode + live replica count) so operators can see at a glance
+            // whether quotas/rate-limit are enforced cluster-wide and over how many replicas.
+            varga.tarn.yarn.shared.SharedState ss = am.getSharedState();
+            model.put("sharedStateMode", ss == null ? "local" : ss.mode());
+            model.put("liveReplicaCount", ss == null ? 1 : ss.liveReplicaCount());
 
             // Top-N token consumers for chargeback visibility. Sorted desc on total tokens.
             MetricsCollector mc = am.getMetricsCollector();
@@ -439,6 +449,32 @@ public class DiscoveryServer {
             sb.append("# TYPE tarn_global_rate_limit_rejected_total counter\n");
             sb.append("tarn_global_rate_limit_rejected_total ")
                     .append(mc.getGlobalRateLimitRejects()).append("\n");
+
+            // Shared-state backend: mode + live replica count. In "local" mode (single replica)
+            // the count is 1; in "zk" mode quotas and the global rate limit are fair-shared across
+            // this many replicas, so an alert on a wrong value catches a misconfigured fleet.
+            varga.tarn.yarn.shared.SharedState ss = am.getSharedState();
+            String ssMode = ss == null ? "local" : ss.mode();
+            int liveReplicas = ss == null ? 1 : ss.liveReplicaCount();
+            sb.append("# HELP tarn_live_replicas Live TARN replicas sharing enforcement state\n");
+            sb.append("# TYPE tarn_live_replicas gauge\n");
+            sb.append("tarn_live_replicas ").append(liveReplicas).append("\n");
+            sb.append("# HELP tarn_shared_state_mode Active shared-state backend (value 1 on the active mode label)\n");
+            sb.append("# TYPE tarn_shared_state_mode gauge\n");
+            sb.append("tarn_shared_state_mode{mode=\"").append(ssMode).append("\"} 1\n");
+
+            // Daily token-budget rejections — pairs with tarn_tokens_*_total to show the budget loop.
+            sb.append("# HELP tarn_token_budget_exceeded_total Requests refused for exceeding the caller's daily token budget\n");
+            sb.append("# TYPE tarn_token_budget_exceeded_total counter\n");
+            sb.append("tarn_token_budget_exceeded_total ").append(mc.getTokenBudgetRejects()).append("\n");
+
+            // Embedding cache effectiveness — hit / (hit + miss) is the GPU work avoided.
+            sb.append("# HELP tarn_embedding_cache_hits_total Embedding requests served from cache\n");
+            sb.append("# TYPE tarn_embedding_cache_hits_total counter\n");
+            sb.append("tarn_embedding_cache_hits_total ").append(mc.getEmbeddingCacheHits()).append("\n");
+            sb.append("# HELP tarn_embedding_cache_misses_total Embedding requests that missed the cache\n");
+            sb.append("# TYPE tarn_embedding_cache_misses_total counter\n");
+            sb.append("tarn_embedding_cache_misses_total ").append(mc.getEmbeddingCacheMisses()).append("\n");
 
             synchronized (containers) {
                 for (Container c : containers) {
@@ -739,9 +775,16 @@ public class DiscoveryServer {
                     return;
                 }
                 boolean viaZk = am.publishQuotasToZk(json);
-                String response = viaZk
-                        ? "published to ZooKeeper (will propagate to all AM replicas)\n"
-                        : "applied locally (ZK unavailable or not configured)\n";
+                varga.tarn.yarn.shared.SharedState ss = am.getSharedState();
+                boolean sharedEnforcement = ss != null && !"local".equals(ss.mode());
+                // Distinguish rule *propagation* (always via the ZK NodeCache) from *enforcement*:
+                // limits only hold cluster-wide when a shared-state backend is active.
+                String response = (viaZk
+                        ? "published to ZooKeeper (will propagate to all AM replicas)"
+                        : "applied locally (ZK unavailable or not configured)")
+                        + (sharedEnforcement
+                            ? "; enforced cluster-wide (shared-state=" + ss.mode() + ")\n"
+                            : "; enforced per-replica (set --shared-state=zk for cluster-wide limits)\n");
                 byte[] out = response.getBytes();
                 exchange.getResponseHeaders().set("Content-Type", "text/plain");
                 exchange.sendResponseHeaders(200, out.length);
