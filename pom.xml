@@ -354,6 +354,27 @@
 						<phase>test</phase>
 						<goals><goal>report</goal></goals>
 					</execution>
+					<execution>
+						<id>check-coverage</id>
+						<phase>test</phase>
+						<goals><goal>check</goal></goals>
+						<configuration>
+							<!-- Coverage floor enforced on `mvn test` (which CI runs). Line coverage is ~59%;
+							     the 50% floor catches a meaningful drop without flapping. Ratchet up over time. -->
+							<rules>
+								<rule>
+									<element>BUNDLE</element>
+									<limits>
+										<limit>
+											<counter>LINE</counter>
+											<value>COVEREDRATIO</value>
+											<minimum>0.50</minimum>
+										</limit>
+									</limits>
+								</rule>
+							</rules>
+						</configuration>
+					</execution>
 				</executions>
 			</plugin>
 			<plugin>

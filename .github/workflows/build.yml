@@ -139,6 +139,17 @@ jobs:
           path: trivy-results.sarif
           retention-days: 14
 
+      # Gate: fail the build on FIXABLE CRITICAL image CVEs. HIGH is still reported via the
+      # SARIF above but does not block yet; ignore-unfixed avoids breaking on CVEs with no patch.
+      - name: Fail on fixable CRITICAL image vulnerabilities
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: 'tarn:scan'
+          format: 'table'
+          severity: 'CRITICAL'
+          ignore-unfixed: true
+          exit-code: '1'
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
