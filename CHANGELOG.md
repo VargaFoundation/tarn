@@ -70,3 +70,35 @@ UTC.
   `observationWindowSec` the operator queries Prometheus for error rate and
   p95 latency vs. the baseline variant, and on success promotes the canary
   to 100% by patching `spec.traffic` weights.
+- Cross-replica enforcement via `--shared-state=zk` (`SHARED_STATE`). Reusing the
+  existing Curator/ZooKeeper client, the OpenAI proxy's global rate limit and
+  per-user quotas are enforced fair-share across replicas — each replica gets
+  `ceil(limit / liveReplicas)`, and the shares sum to the configured ceiling, so
+  the limit holds cluster-wide instead of being enforced ~N× too loosely. Live
+  membership comes from ephemeral znodes (`PersistentNode`, auto-recreated on
+  reconnect); conversation affinity is shared via a `CuratorCache` mirror with
+  throttled writes, so a follow-up turn resolves the same container and the
+  mapping survives an AM restart. The default `local` keeps the historical
+  per-process behaviour, so single-replica / single-AM deployments are unchanged.
+  Mode and live count are exposed as `tarn_shared_state_mode{mode=...}` and
+  `tarn_live_replicas` and on the dashboard. (A precise/Redis backend behind the
+  same interfaces is a planned follow-up.)
+- Per-user **daily token budgets** (`TokenBudgetEnforcer`). A `budgets` array in the
+  same quotas JSON (`{"budgets":[{"user":"alice","tokensPerDay":2000000}, ...]}`)
+  caps how many tokens a user may consume per 24h; once exhausted, requests get
+  `429 budget_exceeded` until the window rolls. This closes the loop on the token
+  metering TARN already does. Rules match by user/group (group = per-member budget),
+  first-match by specificity; enforcement is fair-shared across replicas like the
+  rate limit. Refusals counted as `tarn_token_budget_exceeded_total`. (Per-model and
+  cost-based budgets, and a precise shared counter, are planned follow-ups.)
+- Optional **embedding response cache** (`--embedding-cache-size`, `EMBEDDING_CACHE_SIZE`,
+  0 disables). A bounded per-process LRU keyed on the request-body hash serves repeat
+  `/v1/embeddings` requests without an upstream call — embeddings are deterministic, so
+  hits are always correct. The lookup runs after auth/quota/budget/Ranger (policy still
+  enforced) and a hit consumes no tokens/budget. Hit/miss exposed as
+  `tarn_embedding_cache_hits_total` / `tarn_embedding_cache_misses_total`.
+- Enforced **JaCoCo line-coverage floor** (`jacoco:check`, 50%, runs on `mvn test`) and a **Trivy
+  gate** that fails the build on fixable CRITICAL image CVEs (HIGH still reported via SARIF).
+- Operations [runbook](docs/runbook.md) and design [ADRs](docs/adr/) (shared state for horizontal
+  scaling; ZooKeeper over Redis; fair-share over precise counters); OpenTelemetry agent wiring
+  documented in `values.yaml` / the runbook.

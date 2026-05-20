@@ -44,8 +44,27 @@ audit gaps. Features are opt-in — existing deployments continue to work with t
 - **Quotas & rate limiting**: per-(user, model) token buckets. JSON rules, first-match with
   specificity precedence (`--quotas hdfs:///tarn/quotas.json`). Exceeded requests return
   `429` with `Retry-After`.
+- **Token budgets**: per-user *daily token* allowances (the consumption counterpart to the
+  request-rate quotas above). Add a `budgets` array to the same quotas JSON — e.g.
+  `{"budgets":[{"user":"alice","tokensPerDay":2000000},{"group":"free-tier","tokensPerDay":50000}]}`
+  — and once a user has burned their allowance, new requests get `429 budget_exceeded` until the
+  24h window rolls. Soft cap (checks already-consumed tokens), fair-shared across replicas like the
+  rate limit. Refusals are counted as `tarn_token_budget_exceeded_total`.
+- **Embedding cache** (`--embedding-cache-size N`, 0 = off): embeddings are deterministic, so an
+  exact-match (bounded LRU) cache serves repeat `/v1/embeddings` requests without touching a GPU —
+  a big win for RAG re-embedding. Lookups run after auth/quota/budget/Ranger (policy still applies)
+  and a hit costs no tokens or budget. Effectiveness via
+  `tarn_embedding_cache_hits_total` / `tarn_embedding_cache_misses_total`.
 - **Hot-reload via ZooKeeper**: write new quota JSON to the shared znode
   `/services/triton/config/quotas` — every AM replica reloads within one Curator event.
+- **Cross-replica enforcement** (`--shared-state=zk`, Helm `config.sharedState=zk`): by default
+  (`local`) quotas, the global rate limit and conversation affinity live in process memory —
+  correct for a single replica/AM. With `zk` (reuses the ZK ensemble) the global rate limit and
+  per-user quotas are enforced *fair-share* across replicas — each gets `ceil(limit / liveReplicas)`
+  and the shares sum to the configured ceiling, so the limit holds cluster-wide instead of being
+  enforced ~N× too loosely; conversation affinity is shared and survives a restart. Live count and
+  mode are exposed as `tarn_live_replicas` / `tarn_shared_state_mode{mode=...}`. **If you run more
+  than one replica, set this** — otherwise each replica enforces its own copy of the limits.
 - **Admin REST API**: `GET /admin/quotas` to inspect live rules, `POST /admin/quotas` to
   update them (body is propagated through ZK). Auth via the admin token.
 - **Graceful drain on scale-down**: the AM deregisters a container from ZK first, waits for
@@ -75,11 +94,13 @@ audit gaps. Features are opt-in — existing deployments continue to work with t
   metrics recorded under the `shadow:<model>` label.
 
 ### CI / quality
-- 111 tests (vs. ~35 at baseline), JaCoCo 52%+ coverage, SpotBugs + OWASP Dependency-Check +
-  Trivy (Docker scan) configured. Integration tests against an embedded ZooKeeper via
-  Curator `TestingServer`.
+- 180+ tests (unit + integration against an embedded ZooKeeper via Curator `TestingServer`), with
+  an **enforced JaCoCo line-coverage floor** (`jacoco:check`, currently 50%, ratcheted over time).
+  SpotBugs + OWASP Dependency-Check run in CI; the Docker image is scanned by Trivy and the build
+  **fails on fixable CRITICAL image CVEs** (HIGH reported via SARIF).
 
-See the [Plan file](./SPEC.md) and the per-flag documentation below.
+See the [operations runbook](docs/runbook.md), the [design ADRs](docs/adr/), and the per-flag
+documentation below.
 
 ## Architecture
 
