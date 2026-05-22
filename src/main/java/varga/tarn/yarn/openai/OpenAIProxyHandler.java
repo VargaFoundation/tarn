@@ -242,7 +242,7 @@ public class OpenAIProxyHandler implements HttpHandler {
         // so it runs before the Ranger policy lookup.
         varga.tarn.yarn.TokenBudgetEnforcer budgets = am.getTokenBudgetEnforcer();
         if (budgets != null) {
-            varga.tarn.yarn.TokenBudgetEnforcer.Decision b = budgets.check(user, groups);
+            varga.tarn.yarn.TokenBudgetEnforcer.Decision b = budgets.check(user, groups, baseModel);
             if (!b.allowed) {
                 span.setStatus(StatusCode.ERROR, "budget_exceeded");
                 am.getMetricsCollector().recordTokenBudgetReject();
@@ -471,7 +471,7 @@ public class OpenAIProxyHandler implements HttpHandler {
         // Otherwise fall back to the authenticated principal.
         String user = getUser(ex);
         am.getMetricsCollector().recordTokens(user, model, prompt, completion);
-        recordBudgetUsage(user, prompt + completion);
+        recordBudgetUsage(user, model, prompt, completion);
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("recorded", true);
         resp.put("user", user);
@@ -495,17 +495,17 @@ public class OpenAIProxyHandler implements HttpHandler {
             long completion = usage.path("completion_tokens").asLong(0);
             if (prompt > 0 || completion > 0) {
                 am.getMetricsCollector().recordTokens(user, model, prompt, completion);
-                recordBudgetUsage(user, prompt + completion);
+                recordBudgetUsage(user, model, prompt, completion);
             }
         } catch (Exception ignored) {
             // Non-OpenAI shaped response (e.g. image generation): no usage to record.
         }
     }
 
-    /** Accounts tokens against the caller's daily budget window (no-op when budgets are off). */
-    private void recordBudgetUsage(String user, long tokens) {
+    /** Accounts tokens and cost against the caller's daily budget windows (no-op when off). */
+    private void recordBudgetUsage(String user, String model, long promptTokens, long completionTokens) {
         varga.tarn.yarn.TokenBudgetEnforcer budgets = am == null ? null : am.getTokenBudgetEnforcer();
-        if (budgets != null) budgets.recordUsage(user, tokens);
+        if (budgets != null) budgets.recordUsage(user, model, promptTokens, completionTokens);
     }
 
     /**
@@ -646,7 +646,7 @@ public class OpenAIProxyHandler implements HttpHandler {
                     long completion = usage.path("completion_tokens").asLong(0);
                     if (prompt > 0 || completion > 0) {
                         mc.recordTokens(user, model, prompt, completion);
-                        recordBudgetUsage(user, prompt + completion);
+                        recordBudgetUsage(user, model, prompt, completion);
                     }
                 }
             }

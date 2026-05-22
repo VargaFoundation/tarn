@@ -44,12 +44,25 @@ audit gaps. Features are opt-in — existing deployments continue to work with t
 - **Quotas & rate limiting**: per-(user, model) token buckets. JSON rules, first-match with
   specificity precedence (`--quotas hdfs:///tarn/quotas.json`). Exceeded requests return
   `429` with `Retry-After`.
-- **Token budgets**: per-user *daily token* allowances (the consumption counterpart to the
-  request-rate quotas above). Add a `budgets` array to the same quotas JSON — e.g.
-  `{"budgets":[{"user":"alice","tokensPerDay":2000000},{"group":"free-tier","tokensPerDay":50000}]}`
-  — and once a user has burned their allowance, new requests get `429 budget_exceeded` until the
-  24h window rolls. Soft cap (checks already-consumed tokens), fair-shared across replicas like the
-  rate limit. Refusals are counted as `tarn_token_budget_exceeded_total`.
+- **Token & cost budgets**: per-user *daily* allowances (the consumption counterpart to the
+  request-rate quotas above), in tokens and/or money. Add a `budgets` array (and an optional
+  `prices` table for cost) to the same quotas JSON:
+  ```json
+  {
+    "budgets": [
+      {"user": "alice", "tokensPerDay": 2000000},
+      {"user": "alice", "model": "gpt-4", "tokensPerDay": 100000},
+      {"group": "premium", "costPerDay": 50.0}
+    ],
+    "prices": [{"model": "gpt-4", "inputPer1k": 0.03, "outputPer1k": 0.06},
+               {"model": "*", "inputPer1k": 0.001, "outputPer1k": 0.002}]
+  }
+  ```
+  Rules match by user/group and optionally `model` (per-model budgets), most-specific first; a
+  model-agnostic rule caps the user's total across models. Once the daily token or cost allowance is
+  spent, requests get `429 budget_exceeded` until the 24h window rolls. Soft cap (checks
+  already-consumed), fair-shared across replicas like the rate limit. Refusals are counted as
+  `tarn_token_budget_exceeded_total`.
 - **Embedding cache** (`--embedding-cache-size N`, 0 = off): embeddings are deterministic, so an
   exact-match (bounded LRU) cache serves repeat `/v1/embeddings` requests without touching a GPU —
   a big win for RAG re-embedding. Lookups run after auth/quota/budget/Ranger (policy still applies)

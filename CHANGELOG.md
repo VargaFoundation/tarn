@@ -89,8 +89,12 @@ UTC.
   `429 budget_exceeded` until the window rolls. This closes the loop on the token
   metering TARN already does. Rules match by user/group (group = per-member budget),
   first-match by specificity; enforcement is fair-shared across replicas like the
-  rate limit. Refusals counted as `tarn_token_budget_exceeded_total`. (Per-model and
-  cost-based budgets, and a precise shared counter, are planned follow-ups.)
+  rate limit. Refusals counted as `tarn_token_budget_exceeded_total`. (A precise shared counter
+  is a planned follow-up.)
+- Budgets extended with **per-model** rules (`"model": "gpt-4"`) and **cost** budgets
+  (`"costPerDay"`), the latter priced via a `prices` table (`inputPer1k`/`outputPer1k` per model,
+  `*` fallback) in the same quotas JSON. Consumption is accumulated per (user,model) and per user,
+  so model-scoped and model-agnostic rules each read an O(1) counter.
 - Optional **embedding response cache** (`--embedding-cache-size`, `EMBEDDING_CACHE_SIZE`,
   0 disables). A bounded per-process LRU keyed on the request-body hash serves repeat
   `/v1/embeddings` requests without an upstream call — embeddings are deterministic, so

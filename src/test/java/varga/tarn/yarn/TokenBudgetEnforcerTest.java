@@ -114,4 +114,51 @@ public class TokenBudgetEnforcerTest {
         Thread.sleep(260L);
         assertTrue(be.check("alice", NO_GROUPS).allowed, "budget should reset when the window rolls");
     }
+
+    @Test
+    public void perModelBudgetCapsOnlyThatModel() {
+        TokenBudgetEnforcer be = new TokenBudgetEnforcer();
+        be.loadFromJson("{\"budgets\":[{\"user\":\"alice\",\"model\":\"gpt-4\",\"tokensPerDay\":100}]}");
+        be.recordUsage("alice", "gpt-4", 60, 40); // 100 tokens on gpt-4
+        assertFalse(be.check("alice", NO_GROUPS, "gpt-4").allowed, "gpt-4 budget exhausted");
+        assertEquals("token_budget", be.check("alice", NO_GROUPS, "gpt-4").reason);
+        // No rule matches a different model => unlimited there.
+        assertTrue(be.check("alice", NO_GROUPS, "llama-3").allowed);
+    }
+
+    @Test
+    public void modelSpecificRuleOverridesAgnosticForThatModel() {
+        TokenBudgetEnforcer be = new TokenBudgetEnforcer();
+        be.loadFromJson("{\"budgets\":["
+                + "{\"user\":\"alice\",\"tokensPerDay\":1000},"
+                + "{\"user\":\"alice\",\"model\":\"gpt-4\",\"tokensPerDay\":50}]}");
+        be.recordUsage("alice", "gpt-4", 50, 0); // bumps (alice|gpt-4) and (alice|*) by 50
+        assertFalse(be.check("alice", NO_GROUPS, "gpt-4").allowed, "tight gpt-4 budget (50) hit");
+        assertTrue(be.check("alice", NO_GROUPS, "llama-3").allowed, "agnostic budget (1000) still has room");
+    }
+
+    @Test
+    public void costBudgetUsesPriceTable() {
+        TokenBudgetEnforcer be = new TokenBudgetEnforcer();
+        be.loadFromJson("{"
+                + "\"budgets\":[{\"user\":\"alice\",\"costPerDay\":1.0}],"
+                + "\"prices\":[{\"model\":\"gpt-4\",\"inputPer1k\":10.0,\"outputPer1k\":20.0}]}");
+        // cost = 50/1000*10 + 25/1000*20 = 0.5 + 0.5 = 1.0
+        assertEquals(1.0, be.costOf("gpt-4", 50, 25), 1e-9);
+        be.recordUsage("alice", "gpt-4", 50, 25);
+        TokenBudgetEnforcer.Decision d = be.check("alice", NO_GROUPS, "gpt-4");
+        assertFalse(d.allowed);
+        assertEquals("cost_budget", d.reason);
+    }
+
+    @Test
+    public void wildcardPriceIsFallback() {
+        TokenBudgetEnforcer be = new TokenBudgetEnforcer();
+        be.loadFromJson("{"
+                + "\"budgets\":[{\"user\":\"alice\",\"costPerDay\":0.002}],"
+                + "\"prices\":[{\"model\":\"*\",\"inputPer1k\":0.001,\"outputPer1k\":0.002}]}");
+        // unpriced model 'x' falls back to '*': 1000/1000*0.001 + 500/1000*0.002 = 0.002
+        be.recordUsage("alice", "x", 1000, 500);
+        assertEquals("cost_budget", be.check("alice", NO_GROUPS, "x").reason);
+    }
 }

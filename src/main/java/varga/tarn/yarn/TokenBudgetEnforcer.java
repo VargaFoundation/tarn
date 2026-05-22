@@ -27,84 +27,102 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.IntSupplier;
 
 /**
- * Per-user daily <em>token</em> budgets — the enforcement counterpart to the per-(user,model)
+ * Daily token <em>and cost</em> budgets — the enforcement counterpart to the per-(user,model)
  * request-rate {@link QuotaEnforcer}. Where quotas cap how fast you call, budgets cap how much you
- * consume: TARN already meters token usage ({@code tarn_tokens_*_total}); this closes the loop by
- * refusing new requests once a user has burned their daily allowance.
+ * consume; TARN already meters token usage, so this closes the loop by refusing new requests once a
+ * caller has burned their daily allowance of tokens or money.
  *
- * <p>Rules live in the same JSON document as quotas (so one file, one hot-reload, one admin
- * endpoint) under a top-level {@code budgets} array:
+ * <p>Rules live in the same JSON document as quotas, under {@code budgets} (and an optional
+ * {@code prices} table for cost budgets):
  * <pre>{@code
  * {
- *   "rules":   [ ... per-(user,model) rpm quotas ... ],
  *   "budgets": [
  *     {"user": "alice", "tokensPerDay": 2000000},
- *     {"group": "free-tier", "tokensPerDay": 50000},
- *     {"tokensPerDay": 1000000}
+ *     {"user": "alice", "model": "gpt-4", "tokensPerDay": 100000},
+ *     {"group": "premium", "costPerDay": 50.0}
+ *   ],
+ *   "prices": [
+ *     {"model": "gpt-4", "inputPer1k": 0.03, "outputPer1k": 0.06},
+ *     {"model": "*",     "inputPer1k": 0.001, "outputPer1k": 0.002}
  *   ]
  * }
  * }</pre>
- * First-match selects the user's daily budget by specificity (exact user &gt; group &gt; default);
- * a group rule grants each member that budget (per-user accounting, not a shared pool). Consumption
- * is accumulated per user in a rolling 24h window.
+ * First-match selects the budget by specificity (user+model &gt; user &gt; group+model &gt; group
+ * &gt; model &gt; default). A model-scoped rule caps that model; a model-agnostic rule caps the
+ * user's total across all models. A group rule grants each member that budget (per-user accounting).
  *
- * <p>Multi-replica: like the rate limiter, budgets are enforced fair-share — when a shared-state
- * backend reports {@code N} live replicas, each replica allows {@code budget / N} so the fleet
- * total stays at or below the configured ceiling (it errs slightly strict, never overspends). A
- * precise shared counter is a planned follow-up; until then exact budgets need a single replica.
+ * <p>Consumption is accumulated per user in a rolling 24h window, at two granularities — per
+ * {@code (user, model)} and per {@code (user, *)} — so model-scoped and model-agnostic rules each
+ * read an O(1) counter. Like the rate limiter, budgets are enforced fair-share across replicas:
+ * each replica allows {@code budget / liveReplicas}.
  */
 public class TokenBudgetEnforcer {
 
     private static final Logger log = LoggerFactory.getLogger(TokenBudgetEnforcer.class);
     private static final long DAY_MS = 24L * 60L * 60L * 1000L;
-    // Defensive bound on the per-user counter map so a deployment that churns through many
-    // distinct principals can't grow it without limit; clearing only resets in-window usage.
-    private static final int MAX_TRACKED_USERS = 200_000;
+    private static final String ANY = "*";
+    // Defensive bound on the counter map so churn through many principals can't grow it unbounded.
+    private static final int MAX_TRACKED_KEYS = 400_000;
 
     public static final class Decision {
         public final boolean allowed;
         public final long retryAfterMs;
-        public final long remaining;
+        public final String reason;   // null, "token_budget" or "cost_budget"
         public final String ruleDesc;
 
-        Decision(boolean allowed, long retryAfterMs, long remaining, String ruleDesc) {
+        Decision(boolean allowed, long retryAfterMs, String reason, String ruleDesc) {
             this.allowed = allowed;
             this.retryAfterMs = retryAfterMs;
-            this.remaining = remaining;
+            this.reason = reason;
             this.ruleDesc = ruleDesc;
         }
 
-        static Decision allow(long remaining) { return new Decision(true, 0L, remaining, null); }
-        static Decision deny(long retry, String ruleDesc) { return new Decision(false, retry, 0L, ruleDesc); }
+        static Decision allow() { return new Decision(true, 0L, null, null); }
+        static Decision deny(long retry, String reason, String ruleDesc) {
+            return new Decision(false, retry, reason, ruleDesc);
+        }
     }
 
     static final class Rule {
-        final String user;   // nullable
-        final String group;  // nullable
+        final String user;    // nullable
+        final String group;   // nullable
+        final String model;   // nullable (model-agnostic) or exact / "*"
         final long tokensPerDay;
+        final double costPerDay;
 
-        Rule(String user, String group, long tokensPerDay) {
+        Rule(String user, String group, String model, long tokensPerDay, double costPerDay) {
             this.user = emptyToNull(user);
             this.group = emptyToNull(group);
+            this.model = emptyToNull(model);
             this.tokensPerDay = Math.max(0, tokensPerDay);
+            this.costPerDay = Math.max(0.0, costPerDay);
         }
 
-        boolean matches(String u, Set<String> groups) {
+        boolean modelScoped() {
+            return model != null && !model.equals(ANY);
+        }
+
+        boolean matches(String u, Set<String> groups, String reqModel) {
             if (user != null && !user.equals(u)) return false;
             if (group != null && (groups == null || !groups.contains(group))) return false;
+            if (modelScoped()) {
+                // A model-specific rule only applies when the request's model is known and equal.
+                return reqModel != null && model.equals(reqModel);
+            }
             return true;
         }
 
         int specificity() {
             int s = 0;
-            if (user != null) s += 2;
-            if (group != null) s += 1;
+            if (user != null) s += 4;
+            if (group != null) s += 2;
+            if (modelScoped()) s += 1;
             return s;
         }
     }
@@ -116,8 +134,9 @@ public class TokenBudgetEnforcer {
     private final long windowMs;
     private final ObjectMapper om = new ObjectMapper();
     private volatile List<Rule> rules = new ArrayList<>();
+    // model -> [inputPricePer1k, outputPricePer1k]; key "*" is the fallback.
+    private volatile Map<String, double[]> prices = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, WindowCounter> counters = new ConcurrentHashMap<>();
-    // Live-replica count for fair-share; default 1 (single replica / no shared state).
     private volatile IntSupplier replicaCount = () -> 1;
 
     public TokenBudgetEnforcer() {
@@ -129,7 +148,6 @@ public class TokenBudgetEnforcer {
         this.windowMs = windowMs > 0 ? windowMs : DAY_MS;
     }
 
-    /** Supplies the live-replica count used to fair-share budgets across the fleet. */
     public void setReplicaCountSupplier(IntSupplier supplier) {
         if (supplier != null) this.replicaCount = supplier;
     }
@@ -141,106 +159,180 @@ public class TokenBudgetEnforcer {
     public void loadFromJson(String json) {
         try {
             JsonNode root = om.readTree(json);
-            JsonNode arr = root.path("budgets");
-            List<Rule> parsed = new ArrayList<>();
-            if (arr.isArray()) {
-                for (JsonNode n : arr) {
-                    parsed.add(new Rule(
+            List<Rule> parsedRules = new ArrayList<>();
+            JsonNode budgets = root.path("budgets");
+            if (budgets.isArray()) {
+                for (JsonNode n : budgets) {
+                    parsedRules.add(new Rule(
                             n.path("user").asText(null),
                             n.path("group").asText(null),
-                            n.path("tokensPerDay").asLong(0)));
+                            n.path("model").asText(null),
+                            n.path("tokensPerDay").asLong(0),
+                            n.path("costPerDay").asDouble(0.0)));
                 }
             }
-            parsed.sort((a, b) -> Integer.compare(b.specificity(), a.specificity()));
-            this.rules = parsed;
+            parsedRules.sort((a, b) -> Integer.compare(b.specificity(), a.specificity()));
+
+            Map<String, double[]> parsedPrices = new ConcurrentHashMap<>();
+            JsonNode priceArr = root.path("prices");
+            if (priceArr.isArray()) {
+                for (JsonNode n : priceArr) {
+                    String model = n.path("model").asText(null);
+                    if (model == null || model.isEmpty()) continue;
+                    parsedPrices.put(model, new double[]{
+                            n.path("inputPer1k").asDouble(0.0),
+                            n.path("outputPer1k").asDouble(0.0)});
+                }
+            }
+
+            this.rules = parsedRules;
+            this.prices = parsedPrices;
             this.counters.clear();
-            log.info("Loaded {} token-budget rule(s)", parsed.size());
+            log.info("Loaded {} token-budget rule(s), {} model price(s)", parsedRules.size(), parsedPrices.size());
         } catch (Exception e) {
             log.error("Failed to parse budgets JSON: {}", e.getMessage());
         }
     }
 
-    /** Convenience for tests: a single match-all daily budget. */
+    /** Convenience for tests: a single match-all daily token budget. */
     public void setGlobalBudget(long tokensPerDay) {
         List<Rule> list = new ArrayList<>();
-        list.add(new Rule(null, null, tokensPerDay));
+        list.add(new Rule(null, null, null, tokensPerDay, 0.0));
         this.rules = list;
         this.counters.clear();
     }
 
-    /**
-     * Decides whether {@code user} may issue another request given their already-consumed tokens
-     * in the current window. Soft cap: the request that crosses the line is allowed; subsequent
-     * ones are refused until the window rolls.
-     */
+    // ---- check ---------------------------------------------------------------
+
+    /** Model-agnostic check (legacy / when the model is unknown). */
     public Decision check(String user, Set<String> groups) {
-        Rule matched = firstMatch(user, groups);
-        if (matched == null || matched.tokensPerDay <= 0) {
-            return Decision.allow(Long.MAX_VALUE); // no rule (or unlimited) => allow
-        }
-        long effective = effectiveBudget(matched.tokensPerDay);
-        WindowCounter wc = counters.get(user);
-        long consumed = wc == null ? 0L : wc.current();
-        if (consumed >= effective) {
-            return Decision.deny(wc == null ? windowMs : wc.msUntilReset(), describe(matched));
-        }
-        return Decision.allow(effective - consumed);
+        return check(user, groups, null);
     }
 
-    /** Accounts tokens against {@code user}'s window. No-op when no budgets are configured. */
+    /**
+     * Decides whether {@code user} may issue another request for {@code model}. Soft cap: the
+     * request that crosses a budget is allowed; subsequent ones are refused until the window rolls.
+     */
+    public Decision check(String user, Set<String> groups, String model) {
+        Rule matched = firstMatch(user, groups, model);
+        if (matched == null) return Decision.allow();
+
+        String key = keyFor(user, matched, model);
+        WindowCounter wc = counters.get(key);
+        long tokens = wc == null ? 0L : wc.currentTokens();
+        double cost = wc == null ? 0.0 : wc.currentCost();
+        int n = Math.max(1, replicaCount.getAsInt());
+
+        if (matched.tokensPerDay > 0) {
+            long effective = n == 1 ? matched.tokensPerDay : matched.tokensPerDay / n;
+            if (tokens >= effective) {
+                return Decision.deny(wc == null ? windowMs : wc.msUntilReset(), "token_budget", describe(matched));
+            }
+        }
+        if (matched.costPerDay > 0.0) {
+            double effective = matched.costPerDay / n;
+            if (cost >= effective) {
+                return Decision.deny(wc == null ? windowMs : wc.msUntilReset(), "cost_budget", describe(matched));
+            }
+        }
+        return Decision.allow();
+    }
+
+    // ---- record --------------------------------------------------------------
+
+    /** Legacy: account undifferentiated tokens against the user's model-agnostic counter. */
     public void recordUsage(String user, long tokens) {
         if (tokens <= 0 || user == null || rules.isEmpty()) return;
-        if (counters.size() > MAX_TRACKED_USERS) {
-            counters.clear(); // defensive: bound the map; resets in-window usage (rare)
+        bump(user + "|" + ANY, tokens, 0.0);
+    }
+
+    /** Accounts tokens and the computed cost against both the (user,model) and (user,*) windows. */
+    public void recordUsage(String user, String model, long promptTokens, long completionTokens) {
+        if (user == null || rules.isEmpty()) return;
+        long tokens = Math.max(0, promptTokens) + Math.max(0, completionTokens);
+        if (tokens <= 0) return;
+        double cost = costOf(model, promptTokens, completionTokens);
+        if (counters.size() > MAX_TRACKED_KEYS) {
+            counters.clear(); // defensive bound; resets in-window usage (rare)
         }
-        counters.computeIfAbsent(user, k -> new WindowCounter(windowMs)).add(tokens);
+        bump(user + "|" + ANY, tokens, cost);
+        if (model != null && !model.isEmpty()) {
+            bump(user + "|" + model, tokens, cost);
+        }
     }
 
-    /** Remaining tokens in the current window for the matched budget; -1 when unlimited. */
+    private void bump(String key, long tokens, double cost) {
+        counters.computeIfAbsent(key, k -> new WindowCounter(windowMs)).add(tokens, cost);
+    }
+
+    // ---- introspection -------------------------------------------------------
+
+    /** Remaining tokens in the current window for the matched rule; -1 when unlimited. */
     public long getRemaining(String user, Set<String> groups) {
-        Rule matched = firstMatch(user, groups);
-        if (matched == null || matched.tokensPerDay <= 0) return -1L;
-        long effective = effectiveBudget(matched.tokensPerDay);
-        WindowCounter wc = counters.get(user);
-        long consumed = wc == null ? 0L : wc.current();
-        return Math.max(0L, effective - consumed);
+        return getRemaining(user, groups, null);
     }
 
-    private Rule firstMatch(String user, Set<String> groups) {
+    public long getRemaining(String user, Set<String> groups, String model) {
+        Rule matched = firstMatch(user, groups, model);
+        if (matched == null || matched.tokensPerDay <= 0) return -1L;
+        int n = Math.max(1, replicaCount.getAsInt());
+        long effective = n == 1 ? matched.tokensPerDay : matched.tokensPerDay / n;
+        WindowCounter wc = counters.get(keyFor(user, matched, model));
+        long tokens = wc == null ? 0L : wc.currentTokens();
+        return Math.max(0L, effective - tokens);
+    }
+
+    /** Estimated cost of a completion under the configured price table (0 when unpriced). */
+    public double costOf(String model, long promptTokens, long completionTokens) {
+        double[] p = prices.get(model);
+        if (p == null) p = prices.get(ANY);
+        if (p == null) return 0.0;
+        return (Math.max(0, promptTokens) / 1000.0) * p[0]
+                + (Math.max(0, completionTokens) / 1000.0) * p[1];
+    }
+
+    private Rule firstMatch(String user, Set<String> groups, String model) {
         for (Rule r : rules) {
-            if (r.matches(user, groups)) return r;
+            if (r.matches(user, groups, model)) return r;
         }
         return null;
     }
 
-    private long effectiveBudget(long tokensPerDay) {
-        int n = Math.max(1, replicaCount.getAsInt());
-        return n == 1 ? tokensPerDay : tokensPerDay / n;
+    private static String keyFor(String user, Rule matched, String model) {
+        return user + "|" + (matched.modelScoped() ? model : ANY);
     }
 
     private static String describe(Rule r) {
-        return "budget[user=" + r.user + ",group=" + r.group + ",tokensPerDay=" + r.tokensPerDay + "]";
+        return "budget[user=" + r.user + ",group=" + r.group + ",model=" + r.model
+                + ",tokensPerDay=" + r.tokensPerDay + ",costPerDay=" + r.costPerDay + "]";
     }
 
-    /** Rolling fixed-window token accumulator; resets every {@code windowMs}. */
+    /** Rolling fixed-window accumulator of tokens and cost; resets every {@code windowMs}. */
     static final class WindowCounter {
         private final long windowMs;
         private long windowStart;
-        private final AtomicLong consumed = new AtomicLong();
+        private long tokens;
+        private double cost;
 
         WindowCounter(long windowMs) {
             this.windowMs = windowMs;
             this.windowStart = System.currentTimeMillis();
         }
 
-        synchronized long add(long n) {
+        synchronized void add(long t, double c) {
             roll();
-            return consumed.addAndGet(Math.max(0, n));
+            tokens += Math.max(0, t);
+            cost += Math.max(0.0, c);
         }
 
-        synchronized long current() {
+        synchronized long currentTokens() {
             roll();
-            return consumed.get();
+            return tokens;
+        }
+
+        synchronized double currentCost() {
+            roll();
+            return cost;
         }
 
         synchronized long msUntilReset() {
@@ -254,7 +346,8 @@ public class TokenBudgetEnforcer {
             if (elapsed >= windowMs) {
                 long windows = elapsed / windowMs;
                 windowStart += windows * windowMs;
-                consumed.set(0L);
+                tokens = 0L;
+                cost = 0.0;
             }
         }
     }
