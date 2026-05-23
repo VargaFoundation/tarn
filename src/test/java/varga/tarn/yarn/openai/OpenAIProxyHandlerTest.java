@@ -425,4 +425,72 @@ public class OpenAIProxyHandlerTest {
         // Triton received only the first call.
         assertEquals(1, tritonHits.get());
     }
+
+    @Test
+    public void budgetExceededReturns429BeforeReachingTriton() throws Exception {
+        // Caller is already over a 50-token/day budget; the next request is refused up front.
+        varga.tarn.yarn.TokenBudgetEnforcer budgets = new varga.tarn.yarn.TokenBudgetEnforcer();
+        budgets.setGlobalBudget(50);
+        budgets.recordUsage("alice", "llama-3-70b", 60, 0); // 60 > 50
+        when(mockAm.getTokenBudgetEnforcer()).thenReturn(budgets);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("llama-3-70b"), anyString())).thenReturn(true);
+
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/chat/completions")))
+                        .header("Content-Type", "application/json")
+                        .header("X-Forwarded-User", "alice")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"model\":\"llama-3-70b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(429, resp.statusCode());
+        assertTrue(resp.headers().firstValue("Retry-After").isPresent(), "429 must include Retry-After");
+        JsonNode body = om.readTree(resp.body());
+        assertEquals("budget_exceeded", body.get("error").get("type").asText());
+        assertEquals(0, tritonHits.get(), "over-budget requests must not reach Triton");
+        assertEquals(1L, metrics.getTokenBudgetRejects());
+    }
+
+    @Test
+    public void embeddingCacheServesRepeatRequestWithoutHittingTriton() throws Exception {
+        // Add a fake embeddings backend and enable the cache.
+        AtomicInteger embedHits = new AtomicInteger();
+        fakeTriton.createContext("/v1/embeddings", exh -> {
+            embedHits.incrementAndGet();
+            byte[] resp = ("{\"object\":\"list\",\"data\":[{\"embedding\":[0.1,0.2,0.3]}],"
+                    + "\"usage\":{\"prompt_tokens\":3,\"total_tokens\":3}}").getBytes(StandardCharsets.UTF_8);
+            exh.getResponseHeaders().set("Content-Type", "application/json");
+            exh.sendResponseHeaders(200, resp.length);
+            try (var os = exh.getResponseBody()) { os.write(resp); }
+        });
+        EmbeddingCache cache = new EmbeddingCache(16);
+        when(mockAm.getEmbeddingCache()).thenReturn(cache);
+        when(mockRanger.isAllowed(anyString(), anySet(), eq("infer"), eq("text-embed"), anyString())).thenReturn(true);
+
+        java.util.function.Supplier<HttpResponse<String>> call = () -> {
+            try {
+                return HttpClient.newHttpClient().send(
+                        HttpRequest.newBuilder().uri(URI.create(proxyUrl("/v1/embeddings")))
+                                .header("Content-Type", "application/json")
+                                .header("X-Forwarded-User", "alice")
+                                .POST(HttpRequest.BodyPublishers.ofString(
+                                        "{\"model\":\"text-embed\",\"input\":\"hello world\"}"))
+                                .build(),
+                        HttpResponse.BodyHandlers.ofString());
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
+
+        HttpResponse<String> first = call.get();
+        HttpResponse<String> second = call.get();
+
+        assertEquals(200, first.statusCode());
+        assertEquals(200, second.statusCode());
+        assertEquals(first.body(), second.body(), "cached response must match the original");
+        assertTrue(first.body().contains("embedding"));
+        assertEquals(1, embedHits.get(), "second identical request must be served from cache, not Triton");
+        assertEquals(1L, metrics.getEmbeddingCacheHits());
+        assertEquals(1L, metrics.getEmbeddingCacheMisses());
+    }
 }
