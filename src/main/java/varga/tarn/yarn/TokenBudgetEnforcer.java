@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import varga.tarn.yarn.shared.WindowedCounter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -138,6 +139,14 @@ public class TokenBudgetEnforcer {
     private volatile Map<String, double[]> prices = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, WindowCounter> counters = new ConcurrentHashMap<>();
     private volatile IntSupplier replicaCount = () -> 1;
+    // Optional shared counter for *precise* budgets (e.g. HBase). When present, consumption is
+    // exact across replicas and the fair-share division by replica count is bypassed.
+    private volatile WindowedCounter sharedCounter;
+
+    /** Installs a shared counter for precise budgets; {@code null} keeps the fair-share path. */
+    public void setSharedCounter(WindowedCounter counter) {
+        this.sharedCounter = counter;
+    }
 
     public TokenBudgetEnforcer() {
         this(DAY_MS);
@@ -217,22 +226,36 @@ public class TokenBudgetEnforcer {
         Rule matched = firstMatch(user, groups, model);
         if (matched == null) return Decision.allow();
 
-        String key = keyFor(user, matched, model);
-        WindowCounter wc = counters.get(key);
-        long tokens = wc == null ? 0L : wc.currentTokens();
-        double cost = wc == null ? 0.0 : wc.currentCost();
-        int n = Math.max(1, replicaCount.getAsInt());
+        String suffix = matched.modelScoped() ? model : ANY;
+        WindowedCounter shared = sharedCounter;
+        long tokens;
+        double cost;
+        long retryMs;
+        int n;
+        if (shared != null) {
+            // Precise: exact shared counters, no fair-share division by replica count.
+            tokens = shared.get("bt:" + user + "|" + suffix, windowMs);
+            cost = shared.get("bc:" + user + "|" + suffix, windowMs) / 1_000_000.0;
+            retryMs = msToWindowEnd(windowMs);
+            n = 1;
+        } else {
+            WindowCounter wc = counters.get(user + "|" + suffix);
+            tokens = wc == null ? 0L : wc.currentTokens();
+            cost = wc == null ? 0.0 : wc.currentCost();
+            retryMs = wc == null ? windowMs : wc.msUntilReset();
+            n = Math.max(1, replicaCount.getAsInt());
+        }
 
         if (matched.tokensPerDay > 0) {
             long effective = n == 1 ? matched.tokensPerDay : matched.tokensPerDay / n;
             if (tokens >= effective) {
-                return Decision.deny(wc == null ? windowMs : wc.msUntilReset(), "token_budget", describe(matched));
+                return Decision.deny(retryMs, "token_budget", describe(matched));
             }
         }
         if (matched.costPerDay > 0.0) {
             double effective = matched.costPerDay / n;
             if (cost >= effective) {
-                return Decision.deny(wc == null ? windowMs : wc.msUntilReset(), "cost_budget", describe(matched));
+                return Decision.deny(retryMs, "cost_budget", describe(matched));
             }
         }
         return Decision.allow();
@@ -243,6 +266,11 @@ public class TokenBudgetEnforcer {
     /** Legacy: account undifferentiated tokens against the user's model-agnostic counter. */
     public void recordUsage(String user, long tokens) {
         if (tokens <= 0 || user == null || rules.isEmpty()) return;
+        WindowedCounter shared = sharedCounter;
+        if (shared != null) {
+            shared.incrementAndGet("bt:" + user + "|" + ANY, tokens, windowMs);
+            return;
+        }
         bump(user + "|" + ANY, tokens, 0.0);
     }
 
@@ -252,6 +280,17 @@ public class TokenBudgetEnforcer {
         long tokens = Math.max(0, promptTokens) + Math.max(0, completionTokens);
         if (tokens <= 0) return;
         double cost = costOf(model, promptTokens, completionTokens);
+        WindowedCounter shared = sharedCounter;
+        if (shared != null) {
+            long costMicros = Math.round(cost * 1_000_000.0);
+            shared.incrementAndGet("bt:" + user + "|" + ANY, tokens, windowMs);
+            if (costMicros > 0) shared.incrementAndGet("bc:" + user + "|" + ANY, costMicros, windowMs);
+            if (model != null && !model.isEmpty()) {
+                shared.incrementAndGet("bt:" + user + "|" + model, tokens, windowMs);
+                if (costMicros > 0) shared.incrementAndGet("bc:" + user + "|" + model, costMicros, windowMs);
+            }
+            return;
+        }
         if (counters.size() > MAX_TRACKED_KEYS) {
             counters.clear(); // defensive bound; resets in-window usage (rare)
         }
@@ -275,10 +314,19 @@ public class TokenBudgetEnforcer {
     public long getRemaining(String user, Set<String> groups, String model) {
         Rule matched = firstMatch(user, groups, model);
         if (matched == null || matched.tokensPerDay <= 0) return -1L;
-        int n = Math.max(1, replicaCount.getAsInt());
-        long effective = n == 1 ? matched.tokensPerDay : matched.tokensPerDay / n;
-        WindowCounter wc = counters.get(keyFor(user, matched, model));
-        long tokens = wc == null ? 0L : wc.currentTokens();
+        String suffix = matched.modelScoped() ? model : ANY;
+        WindowedCounter shared = sharedCounter;
+        long tokens;
+        long effective;
+        if (shared != null) {
+            tokens = shared.get("bt:" + user + "|" + suffix, windowMs);
+            effective = matched.tokensPerDay;
+        } else {
+            WindowCounter wc = counters.get(user + "|" + suffix);
+            tokens = wc == null ? 0L : wc.currentTokens();
+            int n = Math.max(1, replicaCount.getAsInt());
+            effective = n == 1 ? matched.tokensPerDay : matched.tokensPerDay / n;
+        }
         return Math.max(0L, effective - tokens);
     }
 
@@ -298,8 +346,10 @@ public class TokenBudgetEnforcer {
         return null;
     }
 
-    private static String keyFor(String user, Rule matched, String model) {
-        return user + "|" + (matched.modelScoped() ? model : ANY);
+    /** Milliseconds until the current fixed window rolls (Retry-After hint for the precise path). */
+    private static long msToWindowEnd(long windowMs) {
+        long now = System.currentTimeMillis();
+        return Math.max(1L, windowMs - (now % windowMs));
     }
 
     private static String describe(Rule r) {

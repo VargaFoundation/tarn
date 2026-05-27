@@ -21,8 +21,11 @@ package varga.tarn.yarn;
  */
 
 import org.junit.jupiter.api.Test;
+import varga.tarn.yarn.shared.WindowedCounter;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -160,5 +163,49 @@ public class TokenBudgetEnforcerTest {
         // unpriced model 'x' falls back to '*': 1000/1000*0.001 + 500/1000*0.002 = 0.002
         be.recordUsage("alice", "x", 1000, 500);
         assertEquals("cost_budget", be.check("alice", NO_GROUPS, "x").reason);
+    }
+
+    // --- precise (shared-counter) path -----------------------------------------------------
+
+    /** Deterministic in-memory windowed counter, standing in for the HBase counter. */
+    static final class FakeCounter implements WindowedCounter {
+        private final Map<String, long[]> m = new HashMap<>();
+        @Override public synchronized long incrementAndGet(String key, long delta, long windowMs) {
+            long[] v = m.computeIfAbsent(key + "@" + (System.currentTimeMillis() / windowMs), x -> new long[1]);
+            v[0] += delta;
+            return v[0];
+        }
+        @Override public synchronized long get(String key, long windowMs) {
+            long[] v = m.get(key + "@" + (System.currentTimeMillis() / windowMs));
+            return v == null ? 0L : v[0];
+        }
+    }
+
+    @Test
+    public void preciseBudgetIsExactAndIgnoresReplicaCount() {
+        TokenBudgetEnforcer be = new TokenBudgetEnforcer();
+        be.setSharedCounter(new FakeCounter());
+        be.setReplicaCountSupplier(() -> 4); // must be ignored in precise mode
+        be.setGlobalBudget(100);
+
+        be.recordUsage("alice", "m", 60, 0);
+        // If the replica count were applied, the cap would be 25 and 60 would already exceed it.
+        assertTrue(be.check("alice", NO_GROUPS, "m").allowed, "precise cap is the full 100, not 100/4");
+        be.recordUsage("alice", "m", 50, 0); // total 110 > 100
+        assertEquals("token_budget", be.check("alice", NO_GROUPS, "m").reason);
+    }
+
+    @Test
+    public void preciseCostBudgetAccumulatesAcrossCalls() {
+        TokenBudgetEnforcer be = new TokenBudgetEnforcer();
+        be.setSharedCounter(new FakeCounter());
+        be.loadFromJson("{"
+                + "\"budgets\":[{\"user\":\"alice\",\"costPerDay\":1.0}],"
+                + "\"prices\":[{\"model\":\"gpt-4\",\"inputPer1k\":10.0,\"outputPer1k\":20.0}]}");
+        // Two calls of 0.5 each => 1.0 total, hitting the cost budget exactly.
+        be.recordUsage("alice", "gpt-4", 50, 0);  // 0.5
+        assertTrue(be.check("alice", NO_GROUPS, "gpt-4").allowed);
+        be.recordUsage("alice", "gpt-4", 0, 25);  // +0.5 => 1.0
+        assertEquals("cost_budget", be.check("alice", NO_GROUPS, "gpt-4").reason);
     }
 }

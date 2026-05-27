@@ -21,6 +21,7 @@ package varga.tarn.yarn.shared;
  */
 
 import org.apache.curator.framework.CuratorFramework;
+import org.apache.hadoop.conf.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -63,6 +64,15 @@ public interface SharedState extends AutoCloseable {
     /** Affinity backend, or {@code null} to use the caller's in-process map. */
     AffinityStore affinity();
 
+    /**
+     * Shared windowed counter for <em>precise</em> budget accounting, or {@code null} when the
+     * backend only offers fair-share (local / zk). When present, token/cost budgets are enforced
+     * exactly across replicas instead of being divided by the live replica count.
+     */
+    default WindowedCounter counters() {
+        return null;
+    }
+
     /** Joins membership and starts caches. No-op for {@code local}. */
     void start() throws Exception;
 
@@ -74,7 +84,8 @@ public interface SharedState extends AutoCloseable {
      * when {@code zk} is requested but no Curator client is available, mirroring the graceful
      * degradation of {@code initZookeeper()}.
      */
-    static SharedState create(String mode, String sharedPath, CuratorFramework zk) {
+    static SharedState create(String mode, String sharedPath, CuratorFramework zk,
+                              Configuration hadoopConf, String hbaseTable) {
         Logger log = LoggerFactory.getLogger(SharedState.class);
         String m = mode == null ? "local" : mode.trim().toLowerCase(Locale.ROOT);
         switch (m) {
@@ -85,6 +96,9 @@ public interface SharedState extends AutoCloseable {
                     return new LocalSharedState();
                 }
                 return new ZkSharedState(zk, sharedPath);
+            case "hbase":
+                // Precise (exact) cross-replica enforcement via HBase Increment + TTL.
+                return new HBaseSharedState(hadoopConf, hbaseTable);
             case "local":
                 return new LocalSharedState();
             default:

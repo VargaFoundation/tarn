@@ -371,16 +371,23 @@ public class ApplicationMaster {
      * the global rate limit are enforced fair-share across replicas and affinity is shared.
      */
     private void initSharedState() {
-        sharedState = varga.tarn.yarn.shared.SharedState.create(
-                config.sharedState, sharedRootPath(), zkClient);
+        varga.tarn.yarn.shared.SharedState ss = null;
         try {
-            sharedState.start();
-        } catch (Exception e) {
-            log.warn("Shared-state '{}' failed to start ({}); falling back to local",
-                    sharedState.mode(), e.toString());
-            try { sharedState.close(); } catch (Exception ignore) { }
-            sharedState = new varga.tarn.yarn.shared.LocalSharedState();
+            ss = varga.tarn.yarn.shared.SharedState.create(
+                    config.sharedState, sharedRootPath(), zkClient, conf, config.hbaseTable);
+            ss.start();
+        } catch (Throwable e) {
+            // Throwable, not Exception: a missing HBase client (provided dep) surfaces as
+            // NoClassDefFoundError. Any failure degrades gracefully to single-replica enforcement.
+            log.warn("Shared-state '{}' failed to initialize ({}); falling back to local",
+                    config.sharedState, e.toString());
+            if (ss != null) {
+                try { ss.close(); } catch (Exception ignore) { }
+            }
+            ss = new varga.tarn.yarn.shared.LocalSharedState();
         }
+        this.sharedState = ss;
+
         varga.tarn.yarn.shared.RateLimitStore rl = sharedState.rateLimits();
         if (rl != null) {
             quotaEnforcer.setRateLimitStore(rl);
@@ -389,8 +396,10 @@ public class ApplicationMaster {
         if (conversationAffinity != null && sharedState.affinity() != null) {
             conversationAffinity.setAffinityStore(sharedState.affinity());
         }
-        // Budgets fair-share by the live replica count (1 in local mode => full budget).
+        // Budgets: precise via a shared counter when the backend offers one (HBase); otherwise
+        // fair-share by the live replica count (1 in local mode => full budget).
         budgetEnforcer.setReplicaCountSupplier(() -> sharedState.liveReplicaCount());
+        budgetEnforcer.setSharedCounter(sharedState.counters());
         if (!"local".equals(sharedState.mode())) {
             log.info("Shared-state mode: {} (replicaId={}, liveReplicas={})",
                     sharedState.mode(), sharedState.replicaId(), sharedState.liveReplicaCount());

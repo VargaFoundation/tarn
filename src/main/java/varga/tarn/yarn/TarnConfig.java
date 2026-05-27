@@ -169,6 +169,9 @@ public class TarnConfig {
      */
     public int embeddingCacheSize;
 
+    /** HBase table name for {@code --shared-state=hbase} (created if absent). */
+    public String hbaseTable;
+
     public TarnConfig() {
         // Defaults from environment or static defaults
         tritonImage = getEnv("TRITON_IMAGE", "nvcr.io/nvidia/tritonserver:24.09-py3");
@@ -251,6 +254,7 @@ public class TarnConfig {
         sharedState = getEnv("SHARED_STATE", "local");
         sharedStatePath = getEnv("SHARED_STATE_PATH", null);
         embeddingCacheSize = Integer.parseInt(getEnv("EMBEDDING_CACHE_SIZE", "0"));
+        hbaseTable = getEnv("HBASE_TABLE", "tarn_shared");
     }
 
     private String getEnv(String key, String defaultValue) {
@@ -308,6 +312,7 @@ public class TarnConfig {
         if (line.hasOption("shared-state")) sharedState = line.getOptionValue("shared-state");
         if (line.hasOption("shared-state-path")) sharedStatePath = line.getOptionValue("shared-state-path");
         if (line.hasOption("embedding-cache-size")) embeddingCacheSize = Integer.parseInt(line.getOptionValue("embedding-cache-size"));
+        if (line.hasOption("hbase-table")) hbaseTable = line.getOptionValue("hbase-table");
         if (line.hasOption("client-port")) clientPort = Integer.parseInt(line.getOptionValue("client-port"));
         if (line.hasOption("ranger-strict")) rangerStrict = true;
         if (line.hasOption("zk-required")) zkRequired = true;
@@ -365,8 +370,8 @@ public class TarnConfig {
         if (stickyRoutingTtlMs < 1_000L) throw new IllegalArgumentException("stickyRoutingTtlMs must be >= 1000");
         if (sharedState != null) {
             String ss = sharedState.trim().toLowerCase(java.util.Locale.ROOT);
-            if (!ss.equals("local") && !ss.equals("zk")) {
-                throw new IllegalArgumentException("--shared-state must be 'local' or 'zk', got '" + sharedState + "'");
+            if (!ss.equals("local") && !ss.equals("zk") && !ss.equals("hbase")) {
+                throw new IllegalArgumentException("--shared-state must be 'local', 'zk' or 'hbase', got '" + sharedState + "'");
             }
         }
         if (embeddingCacheSize < 0) throw new IllegalArgumentException("embeddingCacheSize must be >= 0");
@@ -486,6 +491,8 @@ public class TarnConfig {
                 "Cross-replica state backend: local (default) | zk (reuse ZooKeeper for fair-share quotas/rate-limit and shared, restart-surviving affinity)");
         options.addOption(null, "shared-state-path", true,
                 "ZK root for shared state (default: sibling of --zk-path, e.g. /services/triton/shared)");
+        options.addOption(null, "hbase-table", true,
+                "HBase table for --shared-state=hbase, created if absent (default tarn_shared)");
         options.addOption(null, "embedding-cache-size", true,
                 "Max entries in the per-process embedding response cache (0 disables, default 0)");
         options.addOption("cp", "client-port", true, "Client health endpoint port (default: 8889)");

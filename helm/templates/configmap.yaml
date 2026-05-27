@@ -37,6 +37,7 @@ data:
   # rate limit and per-user quotas are fair-shared across replicas and conversation affinity is
   # shared. Recommended whenever replicaCount > 1.
   SHARED_STATE: {{ .Values.config.sharedState | default "local" | quote }}
+  HBASE_TABLE: {{ .Values.config.hbaseTable | default "tarn_shared" | quote }}
   # Safety defaults
   RANGER_STRICT: {{ .Values.config.rangerStrict | quote }}
   ZK_REQUIRED: {{ .Values.config.zkRequired | quote }}

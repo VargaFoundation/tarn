@@ -135,12 +135,15 @@ config:
   otelEndpoint: ""
   # Scaling
   scaleMode: "composite"
-  # Cross-replica enforcement backend. "local" (default) keeps per-process quotas / rate-limit /
-  # affinity — correct for replicaCount: 1. Set to "zk" when running multiple replicas so the
-  # global rate limit and per-user quotas are fair-shared across the fleet (instead of each
-  # replica enforcing its own copy, i.e. ~N× too loose) and conversation affinity is shared and
-  # survives restarts. "zk" reuses zookeeperQuorum above.
+  # Cross-replica enforcement backend:
+  #   local (default) — per-process; correct for replicaCount: 1.
+  #   zk    — fair-share quotas/rate-limit + shared affinity via zookeeperQuorum (approximate, no
+  #           hot-path I/O); enforces ~limit/replicas each.
+  #   hbase — PRECISE quotas/rate-limit/budgets (atomic Increment) + TTL'd affinity, using the
+  #           cluster's HBase (hbase-site.xml on the classpath). Exact cluster-wide limits.
   sharedState: "local"
+  # HBase table for sharedState=hbase (created automatically if absent).
+  hbaseTable: "tarn_shared"
   # Ranger strict mode (denies by default when plugin init fails).
   rangerStrict: true
   # ZK required (AM refuses to start if ZK is unreachable).
