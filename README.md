@@ -76,8 +76,11 @@ audit gaps. Features are opt-in — existing deployments continue to work with t
   per-user quotas are enforced *fair-share* across replicas — each gets `ceil(limit / liveReplicas)`
   and the shares sum to the configured ceiling, so the limit holds cluster-wide instead of being
   enforced ~N× too loosely; conversation affinity is shared and survives a restart. Live count and
-  mode are exposed as `tarn_live_replicas` / `tarn_shared_state_mode{mode=...}`. **If you run more
-  than one replica, set this** — otherwise each replica enforces its own copy of the limits.
+  mode are exposed as `tarn_live_replicas` / `tarn_shared_state_mode{mode=...}`. For **exact** (not
+  fair-share) cluster-wide limits — and precise token/cost budgets — use `--shared-state=hbase`,
+  which uses the cluster's HBase (atomic `Increment` + per-cell TTL, the Hadoop-native equivalent of
+  Redis `INCR`/`EXPIRE`) with no external dependency. **If you run more than one replica, set one of
+  these** — otherwise each replica enforces its own copy of the limits.
 - **Admin REST API**: `GET /admin/quotas` to inspect live rules, `POST /admin/quotas` to
   update them (body is propagated through ZK). Auth via the admin token.
 - **Graceful drain on scale-down**: the AM deregisters a container from ZK first, waits for

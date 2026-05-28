@@ -1,6 +1,7 @@
 # ADR-0002: ZooKeeper (not Redis) as the first shared-state backend
 
-- Status: Accepted
+- Status: Accepted (the "Redis as the precise backend" option is superseded by
+  [ADR-0004](0004-hbase-not-redis-for-precise-backend.md) — the precise backend is HBase)
 - Date: 2026-05-28
 
 ## Context
@@ -36,5 +37,6 @@ Redis as an optional future backend behind the same interfaces (`RateLimitStore`
 - ZooKeeper is a coordination store, not a high-throughput counter — so the rate/quota/budget design
   must avoid per-request ZK I/O (it does; see [ADR-0003](0003-fair-share-over-precise-counters.md)),
   and high-cardinality affinity writes are throttled.
-- Redis remains the better fit for *precise* cross-replica counters and native-TTL affinity at high
-  cardinality; it is a planned opt-in backend (`--shared-state=redis`) behind the same interfaces.
+- A *precise* counter backend (atomic increment + native TTL) is still wanted; we implemented it on
+  **HBase** rather than Redis to stay Hadoop-native — see
+  [ADR-0004](0004-hbase-not-redis-for-precise-backend.md).

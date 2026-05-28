@@ -10,8 +10,8 @@ proxy must enforce cluster-wide ceilings — global rate limit (req/s), per-(use
 and per-user token budgets (tokens/day) — across N replicas. Two strategies:
 
 1. **Precise distributed counter** — every request does an atomic increment against a shared counter
-   (ZK `DistributedAtomicLong` or Redis `INCR`). Exact, but adds a synchronous round-trip to every
-   inference request and concentrates contention on hot keys.
+   (e.g. HBase `Increment`). Exact, but adds a synchronous round-trip to every inference request and
+   concentrates contention on hot keys.
 2. **Fair-share** — each replica enforces `limit / liveReplicas` locally using its existing in-memory
    bucket/window; the live count comes from membership and is read without per-request I/O.
 
@@ -21,8 +21,9 @@ Use **fair-share by default**. Each replica computes its slice from the membersh
 count (recomputed only on a scale event, not per request) and enforces it with the same local
 token-bucket / window code used in single-replica mode. The remainder of an uneven division is
 handed to the lowest-indexed replicas so per-replica shares sum exactly to the configured ceiling
-(rate/quota); budgets use floor division (never overspend). Expose `--rate-limit-strategy` as the
-seam for a future `precise` mode (ZK/Redis counters).
+(rate/quota); budgets use floor division (never overspend). The precise alternative is offered as a
+separate backend (`--shared-state=hbase`), not the default — see
+[ADR-0004](0004-hbase-not-redis-for-precise-backend.md).
 
 ## Decision drivers
 
@@ -38,5 +39,6 @@ seam for a future `precise` mode (ZK/Redis counters).
 
 - Under skewed load or `limit < replicas`, a replica may throttle before the global limit is truly
   reached. Acceptable for ceilings; documented.
-- Exact cluster-wide accounting (e.g. strict cost budgets) needs the precise/Redis backend — a
-  documented follow-up reachable via `--rate-limit-strategy=precise` without changing call sites.
+- Exact cluster-wide accounting (e.g. strict cost budgets) uses the precise backend
+  (`--shared-state=hbase`): the same `RateLimitStore`/budget call sites run over an HBase-backed
+  shared counter instead of local buckets — see [ADR-0004](0004-hbase-not-redis-for-precise-backend.md).

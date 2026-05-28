@@ -39,19 +39,26 @@ limits are enforced per-replica (≈ N× too loose) and affinity/KV-cache locali
 
 - **Single replica / single YARN AM**: leave `--shared-state=local` (default). Behaviour is exactly
   as before shared state existed.
-- **Multiple replicas** (`replicaCount > 1`, Helm): set `--shared-state=zk` (Helm
+- **Multiple replicas, fair-share** (`replicaCount > 1`, Helm): set `--shared-state=zk` (Helm
   `config.sharedState=zk`). It reuses the configured ZooKeeper ensemble. Quotas, the global rate
   limit and token budgets are then enforced **fair-share** (`ceil(limit / liveReplicas)` per
   replica) and conversation affinity is shared and survives a restart. Confirm with
   `tarn_shared_state_mode{mode="zk"} 1` and `tarn_live_replicas`.
-- ZK layout: membership at `<zk-parent>/shared/members/*` (ephemeral), affinity at
+- **Multiple replicas, exact** (`--shared-state=hbase`, Helm `config.sharedState=hbase`): uses the
+  cluster's HBase (atomic `Increment` + per-cell TTL) for **precise** cluster-wide rate limits,
+  quotas and token/cost budgets, plus TTL'd affinity — no fair-share approximation, no external
+  dependency. Needs `hbase-site.xml` on the classpath; the table (`--hbase-table`, default
+  `tarn_shared`) is auto-created. Confirm with `tarn_shared_state_mode{mode="hbase"} 1`.
+- ZK layout (zk mode): membership at `<zk-parent>/shared/members/*` (ephemeral), affinity at
   `<zk-parent>/shared/affinity/*` (persistent, leader-purged).
-- **ZK outage**: rate limiting keeps enforcing with the last-known replica count (fail-functional);
-  affinity reads continue from the local cache mirror; writes resume on reconnect. The membership
-  ephemeral is auto-recreated (Curator `PersistentNode`). Watch for `zk_connection_lost` /
-  `zk_reconnected` alerts.
-- Fair-share is approximate (lumpy/skewed load); for exact cluster-wide limits use a single replica
-  until the precise/Redis backend lands (see [ADR-0003](adr/0003-fair-share-over-precise-counters.md)).
+- **ZK outage** (zk mode): rate limiting keeps enforcing with the last-known replica count
+  (fail-functional); affinity reads continue from the local cache mirror; writes resume on
+  reconnect. The membership ephemeral is auto-recreated (Curator `PersistentNode`). Watch for
+  `zk_connection_lost` / `zk_reconnected` alerts. **HBase outage** (hbase mode): the counter
+  fails open (allows) rather than hard-failing inference.
+- Choosing: `zk` is approximate (lumpy/skewed load) but adds no hot-path I/O; `hbase` is exact at
+  the cost of one counter round-trip per request. See
+  [ADR-0004](adr/0004-hbase-not-redis-for-precise-backend.md).
 
 ## Quotas & token budgets (hot-reload)
 

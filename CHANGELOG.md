@@ -81,20 +81,29 @@ UTC.
   mapping survives an AM restart. The default `local` keeps the historical
   per-process behaviour, so single-replica / single-AM deployments are unchanged.
   Mode and live count are exposed as `tarn_shared_state_mode{mode=...}` and
-  `tarn_live_replicas` and on the dashboard. (A precise/Redis backend behind the
-  same interfaces is a planned follow-up.)
+  `tarn_live_replicas` and on the dashboard. (For *exact* — not fair-share —
+  enforcement, see the HBase backend below.)
 - Per-user **daily token budgets** (`TokenBudgetEnforcer`). A `budgets` array in the
   same quotas JSON (`{"budgets":[{"user":"alice","tokensPerDay":2000000}, ...]}`)
   caps how many tokens a user may consume per 24h; once exhausted, requests get
   `429 budget_exceeded` until the window rolls. This closes the loop on the token
   metering TARN already does. Rules match by user/group (group = per-member budget),
   first-match by specificity; enforcement is fair-shared across replicas like the
-  rate limit. Refusals counted as `tarn_token_budget_exceeded_total`. (A precise shared counter
-  is a planned follow-up.)
+  rate limit. Refusals counted as `tarn_token_budget_exceeded_total`. (Enforced
+  precisely across replicas with the HBase backend below.)
 - Budgets extended with **per-model** rules (`"model": "gpt-4"`) and **cost** budgets
   (`"costPerDay"`), the latter priced via a `prices` table (`inputPer1k`/`outputPer1k` per model,
   `*` fallback) in the same quotas JSON. Consumption is accumulated per (user,model) and per user,
   so model-scoped and model-agnostic rules each read an O(1) counter.
+- **HBase precise backend** (`--shared-state=hbase`, `SHARED_STATE`, `--hbase-table`) — the
+  Hadoop-native alternative to fair-share, with no external dependency. Atomic server-side
+  `Increment` gives *exact* cross-replica rate limits, quotas and token/cost budgets (no
+  fair-share division), and per-cell TTL gives self-expiring windows and conversation affinity
+  (the Hadoop equivalent of Redis `INCR`/`EXPIRE`). One auto-created table; the HBase client is a
+  `provided` dependency (cluster-supplied, not shaded). The limiting/budget logic is unit-tested
+  against an in-memory counter; the HBase wire is exercised against a real HBase (an in-JVM
+  `HBaseTestingUtility` mini-cluster is blocked locally by a Jetty 11 vs Hadoop-9.4 conflict, so
+  that runs in a CI job with a real/containerised HBase).
 - Optional **embedding response cache** (`--embedding-cache-size`, `EMBEDDING_CACHE_SIZE`,
   0 disables). A bounded per-process LRU keyed on the request-body hash serves repeat
   `/v1/embeddings` requests without an upstream call — embeddings are deterministic, so
